@@ -19,7 +19,7 @@ use tracing::trace;
 use mz_mysql_util::{Config, MySqlTableDesc};
 use mz_repr::Row;
 use mz_sql_parser::ast::UnresolvedItemName;
-use mz_storage_types::sources::mysql::GtidPartition;
+use mz_storage_types::sources::mysql::{GtidPartition, MySqlColumnRef};
 use mz_timely_util::builder_async::AsyncOutputHandle;
 
 use super::super::{DefiniteError, RewindRequest};
@@ -32,6 +32,7 @@ pub(super) struct ReplContext<'a> {
     pub(super) connection_config: &'a Config,
     pub(super) stream: Pin<&'a mut futures::stream::Peekable<BinlogStream>>,
     pub(super) table_info: &'a BTreeMap<UnresolvedItemName, (usize, MySqlTableDesc)>,
+    pub(super) text_columns: &'a Vec<MySqlColumnRef>,
     pub(super) data_output: &'a mut AsyncOutputHandle<
         GtidPartition,
         Vec<((usize, Result<Row, DefiniteError>), GtidPartition, i64)>,
@@ -54,6 +55,7 @@ impl<'a> ReplContext<'a> {
         connection_config: &'a Config,
         stream: Pin<&'a mut futures::stream::Peekable<BinlogStream>>,
         table_info: &'a BTreeMap<UnresolvedItemName, (usize, MySqlTableDesc)>,
+        text_columns: &'a Vec<MySqlColumnRef>,
         data_output: &'a mut AsyncOutputHandle<
             GtidPartition,
             Vec<((usize, Result<Row, DefiniteError>), GtidPartition, i64)>,
@@ -68,6 +70,7 @@ impl<'a> ReplContext<'a> {
             connection_config,
             stream,
             table_info,
+            text_columns,
             data_output,
             data_cap_set,
             upper_cap_set,
