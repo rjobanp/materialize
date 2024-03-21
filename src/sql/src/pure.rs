@@ -44,13 +44,14 @@ use mz_storage_types::configuration::StorageConfiguration;
 use mz_storage_types::connections::inline::IntoInlineConnection;
 use mz_storage_types::connections::Connection;
 use mz_storage_types::errors::ContextCreationError;
-use mz_storage_types::sources::mysql::MySqlSourceDetails;
+use mz_storage_types::sources::mysql::{gtid_set_frontier, MySqlSourceDetails};
 use mz_storage_types::sources::postgres::PostgresSourcePublicationDetails;
 use mz_storage_types::sources::{GenericSourceConnection, SourceConnection};
 use prost::Message;
 use protobuf_native::compiler::{SourceTreeDescriptorDatabase, VirtualSourceTree};
 use protobuf_native::MessageLite;
 use rdkafka::admin::AdminClient;
+use timely::PartialOrder;
 use uuid::Uuid;
 
 use crate::ast::{
@@ -1311,7 +1312,7 @@ async fn purify_alter_source(
     } = &mut stmt;
 
     // Get connection
-    let pg_source_connection = {
+    let source_connection = {
         // Get name.
         let item = match scx.resolve_item(RawItemName::Name(source_name.clone())) {
             Ok(item) => item,
@@ -1331,13 +1332,16 @@ async fn purify_alter_source(
 
         // Ensure it's a source that supports ALTER SOURCE...
         match desc.connection {
-            GenericSourceConnection::Postgres(pg_connection) => pg_connection,
+            GenericSourceConnection::Postgres(_) => {}
+            GenericSourceConnection::MySql(_) => {}
             _ => sql_bail!(
                 "{} is a {} source, which does not support ALTER SOURCE.",
                 scx.catalog.minimal_qualification(item.name()),
                 desc.connection.name()
             ),
         }
+
+        desc.connection
     };
 
     // If we don't need to handle added subsources, early return.
@@ -1355,11 +1359,6 @@ async fn purify_alter_source(
         "details cannot be set before purification"
     );
 
-    let crate::plan::statement::ddl::AlterSourceAddSubsourceOptionExtracted {
-        mut text_columns,
-        ..
-    } = options.clone().try_into()?;
-
     for CreateSourceSubsource {
         subsource,
         reference: _,
@@ -1368,175 +1367,345 @@ async fn purify_alter_source(
         named_subsource_err(subsource)?;
     }
 
-    // Get PostgresConnection for generating subsources.
-    let pg_connection = &pg_source_connection.connection;
-
-    let config = pg_connection
-        .config(
-            &*storage_configuration.connection_context.secrets_reader,
-            storage_configuration,
-        )
-        .await?;
-
-    let available_replication_slots = mz_postgres_util::available_replication_slots(
-        &storage_configuration.connection_context.ssh_tunnel_manager,
-        &config,
-    )
-    .await?;
-
-    // We need 1 additional replication slot for the snapshots
-    if available_replication_slots < 1 {
-        Err(PgSourcePurificationError::InsufficientReplicationSlotsAvailable { count: 1 })?;
-    }
-
-    let mut publication_tables = mz_postgres_util::publication_info(
-        &storage_configuration.connection_context.ssh_tunnel_manager,
-        &config,
-        &pg_source_connection.publication,
-        None,
-    )
-    .await?;
-
-    if publication_tables.is_empty() {
-        Err(PgSourcePurificationError::EmptyPublication(
-            pg_source_connection.publication.to_string(),
-        ))?;
-    }
-
-    let publication_catalog = postgres::derive_catalog_from_publication_tables(
-        &pg_connection.database,
-        &publication_tables,
-    )?;
-
-    let validated_requested_subsources =
-        subsource_gen(targeted_subsources, &publication_catalog, source_name)?;
-
-    // Determine duplicate references to tables by cross-referencing the table
-    // positions in the current publication info to thei
-    let mut current_subsources = BTreeMap::new();
-    for idx in pg_source_connection.table_casts.keys() {
-        // Table casts all have their values increased by to accommodate for the
-        // primary source--this means that to look them up in the publication
-        // tables you must subtract one.
-        let native_idx = *idx - 1;
-        let table_desc = &pg_source_connection.publication_details.tables[native_idx];
-        current_subsources.insert(
-            UnresolvedItemName(vec![
-                Ident::new(pg_connection.database.clone())?,
-                Ident::new(table_desc.namespace.clone())?,
-                Ident::new(table_desc.name.clone())?,
-            ]),
-            native_idx,
-        );
-    }
-
-    for RequestedSubsource { upstream_name, .. } in validated_requested_subsources.iter() {
-        if current_subsources.contains_key(upstream_name) {
-            Err(PlanError::SubsourceAlreadyReferredTo {
-                name: upstream_name.clone(),
-            })?;
-        }
-    }
-
-    validate_subsource_names(&validated_requested_subsources)?;
-
-    postgres::validate_requested_subsources_privileges(
-        &config,
-        &validated_requested_subsources,
-        &storage_configuration.connection_context.ssh_tunnel_manager,
-    )
-    .await?;
     let mut subsource_id_counter = 0;
     let get_transient_subsource_id = move || {
         subsource_id_counter += 1;
         subsource_id_counter
     };
 
-    let text_cols_dict = postgres::generate_text_columns(
-        &publication_catalog,
-        &mut text_columns,
-        &AlterSourceAddSubsourceOptionName::TextColumns.to_ast_string(),
-    )?;
+    let new_subsources = match source_connection {
+        GenericSourceConnection::Postgres(pg_source_connection) => {
+            let crate::plan::statement::ddl::AlterSourceAddSubsourceOptionExtracted {
+                mut text_columns,
+                ..
+            } = options.clone().try_into()?;
 
-    // Normalize options to contain full qualified values.
-    if let Some(text_cols_option) = options
-        .iter_mut()
-        .find(|option| option.name == AlterSourceAddSubsourceOptionName::TextColumns)
-    {
-        let mut seq: Vec<_> = text_columns
-            .into_iter()
-            .map(WithOptionValue::UnresolvedItemName)
-            .collect();
+            // Get PostgresConnection for generating subsources.
+            let pg_connection = &pg_source_connection.connection;
 
-        seq.sort();
-        seq.dedup();
-
-        text_cols_option.value = Some(WithOptionValue::Sequence(seq));
-    }
-
-    let (named_subsources, new_subsources) = postgres::generate_targeted_subsources(
-        &scx,
-        validated_requested_subsources,
-        text_cols_dict,
-        get_transient_subsource_id,
-        &publication_tables,
-    )?;
-
-    *targeted_subsources = named_subsources;
-
-    // An index from table name -> output index.
-    let mut new_name_to_output_map = BTreeMap::new();
-    for (i, table) in publication_tables.iter().enumerate() {
-        new_name_to_output_map.insert(
-            UnresolvedItemName(vec![
-                Ident::new(pg_connection.database.clone())?,
-                Ident::new(table.namespace.clone())?,
-                Ident::new(table.name.clone())?,
-            ]),
-            i,
-        );
-    }
-
-    // Fixup the publication info
-    for (name, idx) in current_subsources {
-        let table = pg_source_connection.publication_details.tables[idx].clone();
-
-        // Determine if this current subsource is in the new publication tables.
-        match new_name_to_output_map.get(&name) {
-            // These are tables that were previously defined; we want to
-            // duplicate their definition to the new `publication_tables`
-            // because this command is meant only to add new tables, not update
-            // the schema of existing tables.
-            Some(cur_idx) => publication_tables[*cur_idx] = table,
-            // These are tables that no longer exist in the publication but the
-            // user has kept around. When the ingestion restarts after adding
-            // the new table, they will error out, but that is not the problem
-            // or scope of this function.
-            None => publication_tables.push(table),
-        }
-    }
-
-    let timeline_id = match pg_source_connection.publication_details.timeline_id {
-        None => {
-            // If we had not yet been able to fill in the source's timeline ID, fill it in now.
-            let replication_client = config
-                .connect_replication(&storage_configuration.connection_context.ssh_tunnel_manager)
+            let config = pg_connection
+                .config(
+                    &*storage_configuration.connection_context.secrets_reader,
+                    storage_configuration,
+                )
                 .await?;
-            let timeline_id = mz_postgres_util::get_timeline_id(&replication_client).await?;
-            Some(timeline_id)
+
+            let available_replication_slots = mz_postgres_util::available_replication_slots(
+                &storage_configuration.connection_context.ssh_tunnel_manager,
+                &config,
+            )
+            .await?;
+
+            // We need 1 additional replication slot for the snapshots
+            if available_replication_slots < 1 {
+                Err(PgSourcePurificationError::InsufficientReplicationSlotsAvailable { count: 1 })?;
+            }
+
+            let mut publication_tables = mz_postgres_util::publication_info(
+                &storage_configuration.connection_context.ssh_tunnel_manager,
+                &config,
+                &pg_source_connection.publication,
+                None,
+            )
+            .await?;
+
+            if publication_tables.is_empty() {
+                Err(PgSourcePurificationError::EmptyPublication(
+                    pg_source_connection.publication.to_string(),
+                ))?;
+            }
+
+            let publication_catalog = postgres::derive_catalog_from_publication_tables(
+                &pg_connection.database,
+                &publication_tables,
+            )?;
+
+            let validated_requested_subsources =
+                subsource_gen(targeted_subsources, &publication_catalog, source_name)?;
+
+            // Determine duplicate references to tables by cross-referencing the table
+            // positions in the current publication info to thei
+            let mut current_subsources = BTreeMap::new();
+            for idx in pg_source_connection.table_casts.keys() {
+                // Table casts all have their values increased by to accommodate for the
+                // primary source--this means that to look them up in the publication
+                // tables you must subtract one.
+                let native_idx = *idx - 1;
+                let table_desc = &pg_source_connection.publication_details.tables[native_idx];
+                current_subsources.insert(
+                    UnresolvedItemName(vec![
+                        Ident::new(pg_connection.database.clone())?,
+                        Ident::new(table_desc.namespace.clone())?,
+                        Ident::new(table_desc.name.clone())?,
+                    ]),
+                    native_idx,
+                );
+            }
+
+            for RequestedSubsource { upstream_name, .. } in validated_requested_subsources.iter() {
+                if current_subsources.contains_key(upstream_name) {
+                    Err(PlanError::SubsourceAlreadyReferredTo {
+                        name: upstream_name.clone(),
+                    })?;
+                }
+            }
+
+            validate_subsource_names(&validated_requested_subsources)?;
+
+            postgres::validate_requested_subsources_privileges(
+                &config,
+                &validated_requested_subsources,
+                &storage_configuration.connection_context.ssh_tunnel_manager,
+            )
+            .await?;
+
+            let text_cols_dict = postgres::generate_text_columns(
+                &publication_catalog,
+                &mut text_columns,
+                &AlterSourceAddSubsourceOptionName::TextColumns.to_ast_string(),
+            )?;
+
+            // Normalize options to contain full qualified values.
+            if let Some(text_cols_option) = options
+                .iter_mut()
+                .find(|option| option.name == AlterSourceAddSubsourceOptionName::TextColumns)
+            {
+                let mut seq: Vec<_> = text_columns
+                    .into_iter()
+                    .map(WithOptionValue::UnresolvedItemName)
+                    .collect();
+
+                seq.sort();
+                seq.dedup();
+
+                text_cols_option.value = Some(WithOptionValue::Sequence(seq));
+            }
+
+            let (named_subsources, new_subsources) = postgres::generate_targeted_subsources(
+                &scx,
+                validated_requested_subsources,
+                text_cols_dict,
+                get_transient_subsource_id,
+                &publication_tables,
+            )?;
+
+            *targeted_subsources = named_subsources;
+
+            // An index from table name -> output index.
+            let mut new_name_to_output_map = BTreeMap::new();
+            for (i, table) in publication_tables.iter().enumerate() {
+                new_name_to_output_map.insert(
+                    UnresolvedItemName(vec![
+                        Ident::new(pg_connection.database.clone())?,
+                        Ident::new(table.namespace.clone())?,
+                        Ident::new(table.name.clone())?,
+                    ]),
+                    i,
+                );
+            }
+
+            // Fixup the publication info
+            for (name, idx) in current_subsources {
+                let table = pg_source_connection.publication_details.tables[idx].clone();
+
+                // Determine if this current subsource is in the new publication tables.
+                match new_name_to_output_map.get(&name) {
+                    // These are tables that were previously defined; we want to
+                    // duplicate their definition to the new `publication_tables`
+                    // because this command is meant only to add new tables, not update
+                    // the schema of existing tables.
+                    Some(cur_idx) => publication_tables[*cur_idx] = table,
+                    // These are tables that no longer exist in the publication but the
+                    // user has kept around. When the ingestion restarts after adding
+                    // the new table, they will error out, but that is not the problem
+                    // or scope of this function.
+                    None => publication_tables.push(table),
+                }
+            }
+
+            let timeline_id = match pg_source_connection.publication_details.timeline_id {
+                None => {
+                    // If we had not yet been able to fill in the source's timeline ID, fill it in now.
+                    let replication_client = config
+                        .connect_replication(
+                            &storage_configuration.connection_context.ssh_tunnel_manager,
+                        )
+                        .await?;
+                    let timeline_id =
+                        mz_postgres_util::get_timeline_id(&replication_client).await?;
+                    Some(timeline_id)
+                }
+                timeline_id => timeline_id,
+            };
+
+            let new_details = PostgresSourcePublicationDetails {
+                tables: publication_tables,
+                slot: pg_source_connection.publication_details.slot.clone(),
+                timeline_id,
+            };
+
+            *details = Some(WithOptionValue::Value(Value::String(hex::encode(
+                new_details.into_proto().encode_to_vec(),
+            ))));
+
+            new_subsources
         }
-        timeline_id => timeline_id,
-    };
+        GenericSourceConnection::MySql(mysql_source_connection) => {
+            let crate::plan::statement::ddl::AlterSourceAddSubsourceOptionExtracted {
+                text_columns,
+                // TODO: Add support for ignore_columns
+                // mut ignore_columns,
+                ..
+            } = options.clone().try_into()?;
 
-    let new_details = PostgresSourcePublicationDetails {
-        tables: publication_tables,
-        slot: pg_source_connection.publication_details.slot.clone(),
-        timeline_id,
-    };
+            let connection = &mysql_source_connection.connection;
 
-    *details = Some(WithOptionValue::Value(Value::String(hex::encode(
-        new_details.into_proto().encode_to_vec(),
-    ))));
+            let config = connection
+                .config(
+                    &*storage_configuration.connection_context.secrets_reader,
+                    storage_configuration,
+                )
+                .await?;
+
+            let mut conn = config
+                .connect(
+                    "mysql purification",
+                    &storage_configuration.connection_context.ssh_tunnel_manager,
+                )
+                .await?;
+
+            let table_schema_request = mz_mysql_util::SchemaRequest::Tables(
+                targeted_subsources
+                    .iter()
+                    .map(|t| {
+                        let idents = &t.reference.0;
+                        // We only support fully qualified table names for now
+                        if idents.len() != 2 {
+                            Err(MySqlSourcePurificationError::InvalidTableReference(
+                                t.reference.to_ast_string(),
+                            ))?;
+                        }
+                        Ok((idents[0].as_str(), idents[1].as_str()))
+                    })
+                    .collect::<Result<Vec<_>, MySqlSourcePurificationError>>()?,
+            );
+            let text_cols_map =
+                mysql::map_column_refs(&text_columns, MySqlConfigOptionName::TextColumns)?;
+
+            // TODO: Add support for ignore_columns
+            // let ignore_cols_map =
+            //     mysql::map_column_refs(&ignore_columns, MySqlConfigOptionName::IgnoreColumns)?;
+
+            // Retrieve schemas for all requested tables
+            let tables = mz_mysql_util::schema_info(
+                &mut *conn,
+                &table_schema_request,
+                &text_cols_map,
+                &BTreeMap::new(),
+            )
+            .await
+            .map_err(|err| match err {
+                mz_mysql_util::MySqlError::UnsupportedDataTypes { columns } => {
+                    PlanError::from(MySqlSourcePurificationError::UnrecognizedTypes {
+                        cols: columns
+                            .into_iter()
+                            .map(|c| (c.qualified_table_name, c.column_name, c.column_type))
+                            .collect(),
+                    })
+                }
+                mz_mysql_util::MySqlError::DuplicatedColumnNames {
+                    qualified_table_name,
+                    columns,
+                } => PlanError::from(MySqlSourcePurificationError::DuplicatedColumnNames(
+                    qualified_table_name,
+                    columns,
+                )),
+                _ => err.into(),
+            })?;
+
+            if tables.is_empty() {
+                Err(MySqlSourcePurificationError::EmptyDatabase)?;
+            }
+
+            let mysql_catalog = mysql::derive_catalog_from_tables(&tables)?;
+
+            let validated_requested_subsources =
+                subsource_gen(targeted_subsources, &mysql_catalog, source_name)?;
+
+            // Determine if there are any duplicate references to the same upstream tables in the existing
+            // subsources.
+            // This is only necessary while #24843 isn't yet implemented, since we assume there
+            // is a 1-to-1 correspondence in the upstream tables and subsource-outputs in the source
+            // definition.
+            for table in mysql_source_connection.details.tables.iter() {
+                let existing_name = mysql::mysql_upstream_name(table)?;
+                if mysql_catalog.resolve(existing_name).is_ok() {
+                    Err(PlanError::SubsourceAlreadyReferredTo {
+                        name: mysql::mysql_upstream_name(table)?,
+                    })?;
+                }
+            }
+
+            validate_subsource_names(&validated_requested_subsources)?;
+
+            mysql::validate_requested_subsources_privileges(
+                &validated_requested_subsources,
+                &mut conn,
+            )
+            .await?;
+
+            // Normalize column options and remove unused column references.
+            if let Some(text_cols_option) = options
+                .iter_mut()
+                .find(|option| option.name == AlterSourceAddSubsourceOptionName::TextColumns)
+            {
+                text_cols_option.value = Some(WithOptionValue::Sequence(
+                    mysql::normalize_column_refs(text_columns, &mysql_catalog)?,
+                ));
+            }
+            // TODO: Add support for ignore_columns
+            // if let Some(ignore_cols_option) = options
+            //     .iter_mut()
+            //     .find(|option| option.name == AlterSourceAddSubsourceOptionName::IgnoreColumns)
+            // {
+            //     ignore_cols_option.value = Some(WithOptionValue::Sequence(
+            //         mysql::normalize_column_refs(ignore_columns, &mysql_catalog)?,
+            //     ));
+            // }
+
+            let (named_subsources, new_subsources) = mysql::generate_targeted_subsources(
+                &scx,
+                validated_requested_subsources,
+                get_transient_subsource_id,
+            )?;
+
+            *targeted_subsources = named_subsources;
+
+            let existing_details = mysql_source_connection.details;
+
+            // Confirm the initial GTID Set is still available to allow snapshotting the new subsource
+            // from the same point in time as the existing subsource.
+            let initial_gtid_set = existing_details.initial_gtid_set;
+            let purged_gtid_set =
+                mz_mysql_util::query_sys_var(&mut conn, "global.gtid_purged").await?;
+            let map_gtid_err = |e: std::io::Error| {
+                MySqlSourcePurificationError::UnsupportedGtidState(e.to_string())
+            };
+            if !PartialOrder::less_equal(
+                &gtid_set_frontier(&purged_gtid_set).map_err(map_gtid_err)?,
+                &gtid_set_frontier(&initial_gtid_set).map_err(map_gtid_err)?,
+            ) {
+                Err(MySqlSourcePurificationError::InitialGtidSetNotAvailable(
+                    initial_gtid_set,
+                ))?;
+            }
+
+            // TODO: Update details with new subsources
+
+            new_subsources
+        }
+        _ => unreachable!(),
+    };
 
     Ok((new_subsources, Statement::AlterSource(stmt)))
 }

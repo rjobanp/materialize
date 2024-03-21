@@ -254,6 +254,10 @@ pub enum MySqlSourcePurificationError {
     RequiresReferencedSubsources,
     #[error("No tables found in referenced schemas")]
     NoTablesFoundForSchemas(Vec<String>),
+    #[error("received a gtid set from the server that violates our requirements: {0}")]
+    UnsupportedGtidState(String),
+    #[error("initial gtid set not available to resume from: {0}")]
+    InitialGtidSetNotAvailable(String),
 }
 
 impl MySqlSourcePurificationError {
