@@ -462,6 +462,11 @@ who = "Nikhil Benesch <nikhil.benesch@gmail.com>"
 criteria = "maintained-and-necessary"
 delta = "3.8.0 -> 3.8.1"
 
+[[audits.thrift]]
+who = "Roshan Jobanputra <roshan@materialize.com>"
+criteria = "safe-to-deploy"
+version = "0.17.0"
+
 [[audits.timely]]
 who = "Moritz Hoffmann <mh@materialize.com>"
 criteria = "safe-to-deploy"
