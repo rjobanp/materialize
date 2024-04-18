@@ -12,7 +12,6 @@ use std::sync::Arc;
 use arrow::datatypes::Schema;
 use arrow::record_batch::RecordBatch;
 use aws_types::sdk_config::SdkConfig;
-use bytesize::ByteSize;
 use mz_arrow_util::builder::ArrowBuilder;
 use mz_aws_util::s3_uploader::{
     CompletedUpload, S3MultiPartUploader, S3MultiPartUploaderConfig, AWS_S3_MAX_PART_COUNT,
@@ -23,30 +22,15 @@ use mz_repr::{GlobalId, RelationDesc, Row};
 use mz_storage_types::sinks::{S3SinkFormat, S3UploadInfo};
 use parquet::arrow::arrow_writer::ArrowWriter;
 
-use super::{CopyToS3Uploader, S3KeyManager};
-
-/// The max buffer size for the ArrowBuilder before we flush its contents to to the
-/// ParquetFile writer, which may flush to the S3 uploader if the row group size
-/// exceeds the limit (see `PARQUET_ROW_GROUP_SIZE`).
-/// NOTE that this ends up being per-batch since there is an independent ParquetUploader
-/// per batch.
-const DEFAULT_ARROW_BUILDER_BUFFER_SIZE: ByteSize = ByteSize::mib(32);
-
-/// The max size we allow each 'row group' in the parquet files to be. Each time the writer
-/// writes a row group, we provide its contents to the S3 uploader. We want to keep
-/// these row groups small enough to upload regularly but large enough that they don't
-/// make the parquet files inefficient to read.
-const PARQUET_ROW_GROUP_SIZE: ByteSize = ByteSize::mib(32);
-
-/// The size of each part in the multi-part upload to use when uploading parquet files to S3.
-const UPLOAD_MULTIPART_PART_SIZE_LIMIT: ByteSize = ByteSize::mib(8);
+use super::{CopyToParameters, CopyToS3Uploader, S3KeyManager};
 
 /// Set the default capacity for the array builders inside the ArrowBuilder. This is the
 /// number of items each builder can hold before it needs to allocate more memory.
 const DEFAULT_ARRAY_BUILDER_ITEM_CAPACITY: usize = 1024;
-/// Set the default buffer size for the string and binary array builders inside the ArrowBuilder.
-/// This is the number of bytes each builder can hold before it needs to allocate more memory.
-const DEFAULT_ARRAY_BUILDER_BUFFER_SIZE: usize = 1024;
+/// Set the default buffer capacity for the string and binary array builders inside the
+/// ArrowBuilder. This is the number of bytes each builder can hold before it needs to allocate
+/// more memory.
+const DEFAULT_ARRAY_BUILDER_DATA_CAPACITY: usize = 1024;
 
 /// A [`ParquetUploader`] that writes rows to parquet files and uploads them to S3.
 ///
@@ -58,7 +42,7 @@ const DEFAULT_ARRAY_BUILDER_BUFFER_SIZE: usize = 1024;
 ///   [`mz_repr::Row`]s. Each [`ColBuilder`] holds a specific [`arrow::array::builder`] type
 ///   for constructing a column of the given type. The entire [`ArrowBuilder`] is flushed to
 ///   the active [`ParquetFile`] by converting it into a [`RecordBatch`] once we've given it
-///   more than [`DEFAULT_ARROW_BUILDER_BUFFER_SIZE`] row bytes.
+///   more than the configured row bytes max size.
 ///
 /// - The [`ParquetFile`] holds a [`ArrowWriter`] that buffers until it has enough data to write
 ///   a parquet 'row group'. The 'row group' size is usually based on the number of rows (in the
@@ -123,6 +107,8 @@ pub(super) struct ParquetUploader {
     /// and to make it easier to take ownership when calling in spawned
     /// tokio tasks (to avoid doing I/O in the surrounding timely context).
     active_file: Option<ParquetFile>,
+    /// Upload and buffer params
+    params: CopyToParameters,
 }
 
 impl CopyToS3Uploader for ParquetUploader {
@@ -131,13 +117,14 @@ impl CopyToS3Uploader for ParquetUploader {
         connection_details: S3UploadInfo,
         sink_id: &GlobalId,
         batch: u64,
+        params: CopyToParameters,
     ) -> Result<ParquetUploader, anyhow::Error> {
         match connection_details.format {
             S3SinkFormat::Parquet => {
                 let builder = ArrowBuilder::new(
                     &connection_details.desc,
                     DEFAULT_ARRAY_BUILDER_ITEM_CAPACITY,
-                    DEFAULT_ARRAY_BUILDER_BUFFER_SIZE,
+                    DEFAULT_ARRAY_BUILDER_DATA_CAPACITY,
                 )?;
                 Ok(ParquetUploader {
                     desc: connection_details.desc,
@@ -146,8 +133,9 @@ impl CopyToS3Uploader for ParquetUploader {
                     batch,
                     next_file_index: 0,
                     builder,
-                    builder_max_size_bytes: DEFAULT_ARROW_BUILDER_BUFFER_SIZE.as_u64(),
+                    builder_max_size_bytes: u64::cast_from(params.arrow_builder_buffer_bytes),
                     active_file: None,
+                    params,
                 })
             }
             _ => anyhow::bail!("Expected Parquet format"),
@@ -189,9 +177,10 @@ impl ParquetUploader {
         let schema = self.builder.schema();
         let bucket = self.key_manager.bucket.clone();
         let sdk_config = Arc::clone(&self.sdk_config);
-        let new_file = ParquetFile::new(schema, bucket, object_key, sdk_config)
-            .run_in_task(|| "ParquetFile::new")
-            .await?;
+        let new_file =
+            ParquetFile::new(schema, bucket, object_key, sdk_config, self.params.clone())
+                .run_in_task(|| "ParquetFile::new")
+                .await?;
 
         self.active_file = Some(new_file);
         Ok(())
@@ -206,7 +195,7 @@ impl ParquetUploader {
             ArrowBuilder::new(
                 &self.desc,
                 DEFAULT_ARRAY_BUILDER_ITEM_CAPACITY,
-                DEFAULT_ARRAY_BUILDER_BUFFER_SIZE,
+                DEFAULT_ARRAY_BUILDER_DATA_CAPACITY,
             )?,
         );
         let arrow_batch = builder.to_record_batch()?;
@@ -237,6 +226,7 @@ impl ParquetUploader {
 struct ParquetFile {
     writer: ArrowWriter<Vec<u8>>,
     uploader: S3MultiPartUploader,
+    params: CopyToParameters,
 }
 
 impl ParquetFile {
@@ -245,27 +235,32 @@ impl ParquetFile {
         bucket: String,
         key: String,
         sdk_config: Arc<SdkConfig>,
+        params: CopyToParameters,
     ) -> Result<Self, anyhow::Error> {
         // TODO: Build a WriterProperties struct with the desired parquet file properties
         // and the correct buffering strategy (configuring the row group size, etc.).
 
         let writer = ArrowWriter::try_new(Vec::new(), schema.into(), None)?;
+        let part_size_limit = u64::cast_from(params.s3_multipart_part_size_bytes);
         let uploader = S3MultiPartUploader::try_new(
             sdk_config.as_ref(),
             bucket,
             key,
             S3MultiPartUploaderConfig {
-                part_size_limit: UPLOAD_MULTIPART_PART_SIZE_LIMIT.as_u64(),
+                part_size_limit,
                 // Set the max size enforced by the uploader to the max
                 // file size it will allow based on the part size limit.
-                file_size_limit: UPLOAD_MULTIPART_PART_SIZE_LIMIT
-                    .as_u64()
+                file_size_limit: part_size_limit
                     .checked_mul(AWS_S3_MAX_PART_COUNT.try_into().expect("known safe"))
                     .expect("known safe"),
             },
         )
         .await?;
-        Ok(Self { writer, uploader })
+        Ok(Self {
+            writer,
+            uploader,
+            params,
+        })
     }
 
     async fn finish(mut self) -> Result<CompletedUpload, anyhow::Error> {
@@ -285,7 +280,7 @@ impl ParquetFile {
         // The writer will flush its buffer to a new parquet row group based on the row count,
         // not the actual size of the data. We flush manually to allow uploading the data in
         // potentially smaller chunks.
-        if u64::cast_from(self.writer.in_progress_size()) > PARQUET_ROW_GROUP_SIZE.as_u64() {
+        if self.writer.in_progress_size() > self.params.s3_parquet_row_group_bytes {
             self.writer.flush().map_err(|err| anyhow::anyhow!(err))?;
         }
 

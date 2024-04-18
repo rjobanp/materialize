@@ -9,18 +9,18 @@
 
 use anyhow::anyhow;
 use aws_types::sdk_config::SdkConfig;
-use bytesize::ByteSize;
 use mz_aws_util::s3_uploader::{
     CompletedUpload, S3MultiPartUploadError, S3MultiPartUploader, S3MultiPartUploaderConfig,
     AWS_S3_MAX_PART_COUNT,
 };
+use mz_ore::cast::CastFrom;
 use mz_ore::task::JoinHandleExt;
 use mz_pgcopy::{encode_copy_format, CopyFormatParams};
 use mz_repr::{GlobalId, RelationDesc, Row};
 use mz_storage_types::sinks::{S3SinkFormat, S3UploadInfo};
 use tracing::info;
 
-use super::{CopyToS3Uploader, S3KeyManager};
+use super::{CopyToParameters, CopyToS3Uploader, S3KeyManager};
 
 /// Required state to upload batches to S3
 pub(super) struct PgCopyUploader {
@@ -45,6 +45,8 @@ pub(super) struct PgCopyUploader {
     /// Currently at a time this will only store one single encoded row
     /// before getting added to the `current_file_uploader`'s buffer.
     buf: Vec<u8>,
+    /// Upload parameters.
+    params: CopyToParameters,
 }
 
 impl CopyToS3Uploader for PgCopyUploader {
@@ -53,6 +55,7 @@ impl CopyToS3Uploader for PgCopyUploader {
         connection_details: S3UploadInfo,
         sink_id: &GlobalId,
         batch: u64,
+        params: CopyToParameters,
     ) -> Result<PgCopyUploader, anyhow::Error> {
         match connection_details.format {
             S3SinkFormat::PgCopy(format_params) => Ok(PgCopyUploader {
@@ -64,6 +67,7 @@ impl CopyToS3Uploader for PgCopyUploader {
                 file_index: 0,
                 current_file_uploader: None,
                 buf: Vec::new(),
+                params,
             }),
             _ => anyhow::bail!("Expected PgCopy format"),
         }
@@ -136,17 +140,17 @@ impl PgCopyUploader {
             .take()
             .expect("sdk_config should always be present");
         // Moving the aws s3 calls onto tokio tasks instead of using timely runtime.
+        let part_size_limit = u64::cast_from(self.params.s3_multipart_part_size_bytes);
         let handle = mz_ore::task::spawn(|| "s3_uploader::try_new", async move {
             let uploader = S3MultiPartUploader::try_new(
                 &sdk_config,
                 bucket,
                 object_key,
                 S3MultiPartUploaderConfig {
-                    part_size_limit: ByteSize::mib(10).as_u64(),
+                    part_size_limit,
                     // Set the max size enforced by the uploader to the max
                     // file size it will allow based on the part size limit.
-                    file_size_limit: ByteSize::mib(10)
-                        .as_u64()
+                    file_size_limit: part_size_limit
                         .checked_mul(AWS_S3_MAX_PART_COUNT.try_into().expect("known safe"))
                         .expect("known safe"),
                 },
@@ -245,6 +249,11 @@ mod tests {
             },
             &sink_id,
             batch,
+            CopyToParameters {
+                s3_multipart_part_size_bytes: 10 * 1024 * 1024,
+                arrow_builder_buffer_bytes: 0,
+                s3_parquet_row_group_bytes: 0,
+            },
         )?;
         let mut row = Row::default();
         row.packer().push(Datum::from("1234567"));

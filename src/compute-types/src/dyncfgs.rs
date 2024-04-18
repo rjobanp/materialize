@@ -109,6 +109,31 @@ pub const HYDRATION_CONCURRENCY: Config<usize> = Config::new(
     "Controls how many compute dataflows may hydrate concurrently.",
 );
 
+/// The max buffer size for the ArrowBuilder in each copy-to-s3 batch
+/// before we flush its contents to to the ParquetFile writer
+pub const COPY_TO_S3_ARROW_BUILDER_BUFFER_BYTES: Config<usize> = Config::new(
+    "copy_to_s3_arrow_builder_buffer_bytes",
+    1024 * 1024 * 32,
+    "The max size of each ArrowBuilder buffer COPY TO S3.",
+);
+
+/// The max size we allow each 'row group' in the parquet files to be. Each time the writer
+/// writes a row group, we provide its contents to the S3 uploader. We want to keep
+/// these row groups small enough to upload regularly but large enough that they don't
+/// make the parquet files inefficient to read.
+pub const COPY_TO_S3_PARQUET_ROW_GROUP_BYTES: Config<usize> = Config::new(
+    "copy_to_s3_parquet_row_group_bytes",
+    1024 * 1024 * 32,
+    "The max size for each 'row-group' in parquet files output by COPY TO S3.",
+);
+
+/// The size of each part in the multi-part upload to use when uploading files to S3.
+pub const COPY_TO_S3_MULTIPART_PART_SIZE_BYTES: Config<usize> = Config::new(
+    "copy_to_s3_multipart_part_size_bytes",
+    1024 * 1024 * 8,
+    "The size of each part in a multipart upload to S3.",
+);
+
 /// Adds the full set of all compute `Config`s.
 pub fn all_dyncfgs(configs: ConfigSet) -> ConfigSet {
     configs
@@ -124,4 +149,7 @@ pub fn all_dyncfgs(configs: ConfigSet) -> ConfigSet {
         .add(&LGALLOC_BACKGROUND_INTERVAL)
         .add(&LGALLOC_SLOW_CLEAR_BYTES)
         .add(&HYDRATION_CONCURRENCY)
+        .add(&COPY_TO_S3_ARROW_BUILDER_BUFFER_BYTES)
+        .add(&COPY_TO_S3_PARQUET_ROW_GROUP_BYTES)
+        .add(&COPY_TO_S3_MULTIPART_PART_SIZE_BYTES)
 }

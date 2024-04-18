@@ -14,6 +14,10 @@ use std::rc::Rc;
 
 use differential_dataflow::{Collection, Hashable};
 use mz_compute_client::protocol::response::CopyToResponse;
+use mz_compute_types::dyncfgs::{
+    COPY_TO_S3_ARROW_BUILDER_BUFFER_BYTES, COPY_TO_S3_MULTIPART_PART_SIZE_BYTES,
+    COPY_TO_S3_PARQUET_ROW_GROUP_BYTES,
+};
 use mz_compute_types::sinks::{ComputeSinkDesc, CopyToS3OneshotSinkConnection};
 use mz_repr::{Diff, GlobalId, Row, Timestamp};
 use mz_storage_types::controller::CollectionMetadata;
@@ -108,6 +112,15 @@ where
                     }
                 });
 
+        let params = mz_storage_operators::s3_oneshot_sink::CopyToParameters {
+            arrow_builder_buffer_bytes: COPY_TO_S3_ARROW_BUILDER_BUFFER_BYTES
+                .get(&compute_state.worker_config),
+            s3_parquet_row_group_bytes: COPY_TO_S3_PARQUET_ROW_GROUP_BYTES
+                .get(&compute_state.worker_config),
+            s3_multipart_part_size_bytes: COPY_TO_S3_MULTIPART_PART_SIZE_BYTES
+                .get(&compute_state.worker_config),
+        };
+
         mz_storage_operators::s3_oneshot_sink::copy_to(
             input,
             error_stream,
@@ -117,6 +130,7 @@ where
             self.aws_connection.clone(),
             sink_id,
             self.connection_id,
+            params,
             one_time_callback,
         );
 
