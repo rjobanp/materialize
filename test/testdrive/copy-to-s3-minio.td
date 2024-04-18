@@ -75,14 +75,6 @@ contains:COPY TO target must have type text, not type integer
   );
 contains:ORDER BY is not supported in SELECT query for COPY statements
 
-! COPY t TO 's3://path/to/dir'
-  WITH (
-    AWS CONNECTION = aws_conn,
-    FORMAT = 'csv',
-    MAX FILE SIZE = '1kB'
-  );
-contains:MAX FILE SIZE cannot be less than 16MB
-
 # Creating cluster with multiple replicas, each with multiple workers
 > CREATE CLUSTER c1 REPLICAS (r1 (size '2'), r2 (size '2'));
 > SET cluster = c1;
@@ -91,7 +83,6 @@ contains:MAX FILE SIZE cannot be less than 16MB
 > COPY t TO 's3://copytos3/test/1/' || TO_CHAR(now(), 'YYYY-MM-DD')
   WITH (
     AWS CONNECTION = aws_conn,
-    MAX FILE SIZE = "100MB",
     FORMAT = 'csv'
   );
 
@@ -102,21 +93,18 @@ contains:MAX FILE SIZE cannot be less than 16MB
 > COPY (SELECT a FROM t) TO 's3://copytos3/test/2'
   WITH (
     AWS CONNECTION = aws_conn,
-    MAX FILE SIZE = "100MB",
     FORMAT = 'csv'
   );
 
 > COPY (SELECT array[1,2]::int[], false::bool, 'Inf'::double, '{"s": "abc"}'::jsonb, 1::mz_timestamp, 32767::smallint, 2147483647::integer, 9223372036854775807::bigint, 12345678901234567890123.4567890123456789::numeric(39,16), '2010-10-10'::date, '10:10:10'::time, '2010-10-10 10:10:10+00'::timestamp, '0 day'::interval, 'aaaa'::text, '\\xAAAA'::bytea, 'това е'::text, 'текст'::bytea) TO 's3://copytos3/test/3'
   WITH (
     AWS CONNECTION = aws_conn,
-    MAX FILE SIZE = "100MB",
     FORMAT = 'csv'
   );
 
 ! COPY (SELECT a FROM t) TO 's3://copytos3'
   WITH (
     AWS CONNECTION = aws_conn,
-    MAX FILE SIZE = "100MB",
     FORMAT = 'csv'
   );
 contains:S3 bucket path is not empty
@@ -124,7 +112,6 @@ contains:S3 bucket path is not empty
 > COPY (SELECT * FROM generate_series(1, 1000000)) TO 's3://copytos3/test/4'
   WITH (
     AWS CONNECTION = aws_conn,
-    MAX FILE SIZE = "100MB",
     FORMAT = 'csv'
   );
 
@@ -147,7 +134,7 @@ $ s3-verify-data bucket=copytos3 key=test/3
 # sentinel object is written during the copy
 
 $ postgres-execute background=true connection=postgres://materialize:materialize@${testdrive.materialize-sql-addr}
-COPY (SELECT * FROM generate_series(1, 5000000)) TO 's3://copytos3/test/5' WITH (AWS CONNECTION = aws_conn, MAX FILE SIZE = "100MB", FORMAT = 'csv');
+COPY (SELECT * FROM generate_series(1, 5000000)) TO 's3://copytos3/test/5' WITH (AWS CONNECTION = aws_conn, FORMAT = 'csv');
 
 $ s3-verify-keys bucket=copytos3 prefix-path=test/5 key-pattern=INCOMPLETE
 
@@ -157,14 +144,12 @@ $ s3-verify-keys bucket=copytos3 prefix-path=test/5 key-pattern=INCOMPLETE
 > COPY t TO 's3://copytos3/parquet_test/1/' || TO_CHAR(now(), 'YYYY-MM-DD')
   WITH (
     AWS CONNECTION = aws_conn,
-    MAX FILE SIZE = "100MB",
     FORMAT = 'parquet'
   );
 
 > COPY (SELECT a FROM t) TO 's3://copytos3/parquet_test/2'
   WITH (
     AWS CONNECTION = aws_conn,
-    MAX FILE SIZE = "100MB",
     FORMAT = 'parquet'
   );
 
@@ -172,14 +157,12 @@ $ s3-verify-keys bucket=copytos3 prefix-path=test/5 key-pattern=INCOMPLETE
 # > COPY (SELECT array[1,2]::int[], false::bool, 'Inf'::double, '{"s": "abc"}'::jsonb, 1::mz_timestamp, 32767::smallint, 2147483647::integer, 9223372036854775807::bigint, 12345678901234567890123.4567890123456789::numeric(39,16), '2010-10-10'::date, '10:10:10'::time, '2010-10-10 10:10:10+00'::timestamp, '0 day'::interval, 'aaaa'::text, '\\xAAAA'::bytea, 'това е'::text, 'текст'::bytea) TO 's3://copytos3/parquet_test/3'
 #   WITH (
 #     AWS CONNECTION = aws_conn,
-#     MAX FILE SIZE = "100MB",
 #     FORMAT = 'parquet'
 #   );
 
 > COPY (SELECT false::bool, 'Inf'::double, 1::mz_timestamp, 32767::smallint, 2147483647::integer, 9223372036854775807::bigint, '2010-10-10'::date, '10:10:10'::time, '2010-10-10 10:10:10+00'::timestamp, 'aaaa'::text, '\\xAAAA'::bytea, 'това е'::text, 'текст'::bytea) TO 's3://copytos3/parquet_test/3'
   WITH (
     AWS CONNECTION = aws_conn,
-    MAX FILE SIZE = "100MB",
     FORMAT = 'parquet'
   );
 

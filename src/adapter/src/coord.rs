@@ -445,8 +445,6 @@ pub struct CopyToContext {
     pub connection_id: GlobalId,
     /// Format params to format the data.
     pub format: S3SinkFormat,
-    /// Approximate max file size of each uploaded file.
-    pub max_file_size: u64,
     /// Number of batches the output of the COPY TO will be partitioned into
     /// to distribute the load across workers deterministically.
     /// This is only an option since it's not set when CopyToContext is instantiated

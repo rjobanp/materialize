@@ -60,8 +60,8 @@ where
         // Splitting the data across a known number of batches to distribute load across the cluster.
         // Each worker will be handling data belonging to 0 or more batches. We are doing this so that
         // we can write files to s3 deterministically across different replicas of different sizes
-        // using the batch ID. Each worker will split a batch's data into 1 or more
-        // files based on the user provided `MAX_FILE_SIZE`.
+        // using the batch ID. Each worker may split a batch's data into multiple files based on S3
+        // file size limits
         let batch_count = self.output_batch_count;
 
         // This relies on an assumption the output order after the Exchange is deterministic, which

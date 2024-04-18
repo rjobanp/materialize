@@ -236,7 +236,6 @@ impl<'s> Optimize<LocalMirPlan<Resolved<'s>>> for Optimizer {
                 ComputeSinkConnection::CopyToS3Oneshot(CopyToS3OneshotSinkConnection {
                     upload_info: S3UploadInfo {
                         uri: self.copy_to_context.uri.to_string(),
-                        max_file_size: self.copy_to_context.max_file_size,
                         desc: self.copy_to_context.desc.clone(),
                         format: self.copy_to_context.format.clone(),
                     },

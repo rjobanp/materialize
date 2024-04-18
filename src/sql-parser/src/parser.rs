@@ -5450,10 +5450,6 @@ impl<'a> Parser<'a> {
                     value: Some(self.parse_object_option_value()?),
                 });
             }
-            MAX => {
-                self.expect_keywords(&[FILE, SIZE])?;
-                CopyOptionName::MaxFileSize
-            }
             _ => unreachable!(),
         };
         Ok(CopyOption {

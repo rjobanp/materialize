@@ -6333,7 +6333,6 @@ dependencies = [
  "proptest",
  "sentry",
  "serde",
- "thiserror",
  "timely",
  "tokio",
  "tracing",

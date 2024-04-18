@@ -70,14 +70,6 @@ contains:COPY TO target must have type text, not type integer
   );
 contains:ORDER BY is not supported in SELECT query for COPY statements
 
-! COPY t TO 's3://path/to/dir'
-  WITH (
-    AWS CONNECTION = aws_conn,
-    FORMAT = 'csv',
-    MAX FILE SIZE = '1kB'
-  );
-contains:MAX FILE SIZE cannot be less than 16MB
-
 # Creating cluster with multiple replicas, each with multiple workers
 > CREATE CLUSTER c1 REPLICAS (r1 (size '2'), r2 (size '1'));
 > SET cluster = c1;
@@ -86,7 +78,6 @@ contains:MAX FILE SIZE cannot be less than 16MB
 > COPY t TO 's3://${arg.s3-prefix}/1/' || TO_CHAR(now(), 'YYYY-MM-DD')
   WITH (
     AWS CONNECTION = aws_conn,
-    MAX FILE SIZE = "100MB",
     FORMAT = 'csv'
   );
 
@@ -105,21 +96,18 @@ contains:MAX FILE SIZE cannot be less than 16MB
 > COPY (SELECT a FROM t) TO 's3://${arg.s3-prefix}/2/'
   WITH (
     AWS CONNECTION = aws_conn,
-    MAX FILE SIZE = "100MB",
     FORMAT = 'csv'
   );
 
 > COPY (SELECT 1000) TO 's3://${arg.s3-prefix}/3/'
   WITH (
     AWS CONNECTION = aws_conn,
-    MAX FILE SIZE = "100MB",
     FORMAT = 'csv'
   );
 
 > COPY (SELECT generate_series(1, 1000000)) TO 's3://${arg.s3-prefix}/4/'
   WITH (
     AWS CONNECTION = aws_conn,
-    MAX FILE SIZE = "100MB",
     FORMAT = 'csv'
   );
 

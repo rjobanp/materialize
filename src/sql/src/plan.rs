@@ -811,7 +811,6 @@ pub struct CopyToPlan {
     /// The ID of the connection.
     pub connection_id: GlobalId,
     pub format: S3SinkFormat,
-    pub max_file_size: u64,
 }
 
 #[derive(Clone, Debug)]

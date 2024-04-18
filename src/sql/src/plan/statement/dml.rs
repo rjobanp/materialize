@@ -22,7 +22,6 @@ use mz_ore::num::NonNeg;
 use mz_ore::soft_panic_or_log;
 use mz_pgcopy::{CopyCsvFormatParams, CopyFormatParams, CopyTextFormatParams};
 use mz_repr::adt::numeric::NumericMaxScale;
-use mz_repr::bytes::ByteSize;
 use mz_repr::explain::{ExplainConfig, ExplainFormat};
 use mz_repr::optimize::OptimizerFeatureOverrides;
 use mz_repr::{Datum, GlobalId, RelationDesc, ScalarType};
@@ -34,7 +33,6 @@ use mz_sql_parser::ast::{
 use mz_sql_parser::ident;
 use mz_storage_types::sinks::{
     KafkaSinkConnection, KafkaSinkFormat, S3SinkFormat, StorageSinkConnection,
-    MAX_S3_SINK_FILE_SIZE, MIN_S3_SINK_FILE_SIZE,
 };
 
 use crate::ast::display::AstDisplay;
@@ -1014,19 +1012,6 @@ fn plan_copy_to_expr(
 
     let to = plan_expr(ecx, &to_expr)?.type_as(ecx, &ScalarType::String)?;
 
-    if options.max_file_size.as_bytes() < MIN_S3_SINK_FILE_SIZE.as_bytes() {
-        sql_bail!(
-            "MAX FILE SIZE cannot be less than {}",
-            MIN_S3_SINK_FILE_SIZE
-        );
-    }
-    if options.max_file_size.as_bytes() > MAX_S3_SINK_FILE_SIZE.as_bytes() {
-        sql_bail!(
-            "MAX FILE SIZE cannot be greater than {}",
-            MAX_S3_SINK_FILE_SIZE
-        );
-    }
-
     Ok(Plan::CopyTo(CopyToPlan {
         select_plan,
         desc,
@@ -1034,7 +1019,6 @@ fn plan_copy_to_expr(
         connection: connection.to_owned(),
         connection_id: conn_id,
         format,
-        max_file_size: options.max_file_size.as_bytes(),
     }))
 }
 
@@ -1111,8 +1095,7 @@ generate_extracted_config!(
     (Escape, String),
     (Quote, String),
     (Header, bool),
-    (AwsConnection, with_options::Object),
-    (MaxFileSize, ByteSize, Default(ByteSize::mb(256)))
+    (AwsConnection, with_options::Object)
 );
 
 pub fn plan_copy(

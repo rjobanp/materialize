@@ -107,7 +107,6 @@ impl Coordinator {
             connection,
             connection_id,
             format,
-            max_file_size,
         }: plan::CopyToPlan,
         target_cluster: TargetCluster,
     ) {
@@ -150,7 +149,6 @@ impl Coordinator {
                     connection,
                     connection_id,
                     format,
-                    max_file_size,
                     // This will be set in `peek_stage_validate` stage below.
                     output_batch_count: None,
                 }),

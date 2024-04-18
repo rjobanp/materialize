@@ -15,8 +15,7 @@ use aws_types::sdk_config::SdkConfig;
 use bytesize::ByteSize;
 use mz_arrow_util::builder::ArrowBuilder;
 use mz_aws_util::s3_uploader::{
-    CompletedUpload, S3MultiPartUploadError, S3MultiPartUploader, S3MultiPartUploaderConfig,
-    AWS_S3_MAX_PART_COUNT,
+    CompletedUpload, S3MultiPartUploader, S3MultiPartUploaderConfig, AWS_S3_MAX_PART_COUNT,
 };
 use mz_ore::cast::CastFrom;
 use mz_ore::future::OreFutureExt;
@@ -29,13 +28,15 @@ use super::{CopyToS3Uploader, S3KeyManager};
 /// The max buffer size for the ArrowBuilder before we flush its contents to to the
 /// ParquetFile writer, which may flush to the S3 uploader if the row group size
 /// exceeds the limit (see `PARQUET_ROW_GROUP_SIZE`).
-const DEFAULT_ARROW_BUILDER_BUFFER_SIZE: ByteSize = ByteSize::mib(128);
+/// NOTE that this ends up being per-batch since there is an independent ParquetUploader
+/// per batch.
+const DEFAULT_ARROW_BUILDER_BUFFER_SIZE: ByteSize = ByteSize::mib(32);
 
 /// The max size we allow each 'row group' in the parquet files to be. Each time the writer
 /// writes a row group, we provide its contents to the S3 uploader. We want to keep
 /// these row groups small enough to upload regularly but large enough that they don't
 /// make the parquet files inefficient to read.
-const PARQUET_ROW_GROUP_SIZE: ByteSize = ByteSize::mib(128);
+const PARQUET_ROW_GROUP_SIZE: ByteSize = ByteSize::mib(32);
 
 /// The size of each part in the multi-part upload to use when uploading parquet files to S3.
 const UPLOAD_MULTIPART_PART_SIZE_LIMIT: ByteSize = ByteSize::mib(8);
@@ -112,9 +113,6 @@ pub(super) struct ParquetUploader {
     key_manager: S3KeyManager,
     /// Identifies the batch that files uploaded by this uploader belong to.
     batch: u64,
-    /// The desired file size. A new file upload will be started
-    /// when the size exceeds this amount.
-    max_file_size: u64,
     /// The aws sdk config.
     sdk_config: Arc<SdkConfig>,
     /// The active arrow builder.
@@ -146,13 +144,9 @@ impl CopyToS3Uploader for ParquetUploader {
                     sdk_config: Arc::new(sdk_config),
                     key_manager: S3KeyManager::new(sink_id, &connection_details.uri),
                     batch,
-                    max_file_size: connection_details.max_file_size,
                     next_file_index: 0,
                     builder,
-                    builder_max_size_bytes: std::cmp::min(
-                        connection_details.max_file_size,
-                        DEFAULT_ARROW_BUILDER_BUFFER_SIZE.as_u64(),
-                    ),
+                    builder_max_size_bytes: DEFAULT_ARROW_BUILDER_BUFFER_SIZE.as_u64(),
                     active_file: None,
                 })
             }
@@ -195,8 +189,7 @@ impl ParquetUploader {
         let schema = self.builder.schema();
         let bucket = self.key_manager.bucket.clone();
         let sdk_config = Arc::clone(&self.sdk_config);
-        let max_file_size = self.max_file_size;
-        let new_file = ParquetFile::new(schema, bucket, object_key, sdk_config, max_file_size)
+        let new_file = ParquetFile::new(schema, bucket, object_key, sdk_config)
             .run_in_task(|| "ParquetFile::new")
             .await?;
 
@@ -227,28 +220,12 @@ impl ParquetUploader {
         }
 
         if let Some(mut active_file) = self.active_file.take() {
-            let (res, arrow_batch, mut active_file) = async move {
-                let res = active_file.write_arrow_batch(&arrow_batch).await;
-                (res, arrow_batch, active_file)
+            let active_file = async move {
+                active_file.write_arrow_batch(&arrow_batch).await?;
+                Ok::<ParquetFile, anyhow::Error>(active_file)
             }
             .run_in_task(|| "ParquetFile::write_arrow_batch")
-            .await;
-            match res {
-                Ok(()) => {}
-                Err(ParquetFileError::RecordBatchExceedsMaxFileLimit) => {
-                    // The current batch would exceed the file size limit so start a new file
-                    // and write the batch to it.
-                    self.start_new_file().await?;
-                    active_file = self.active_file.take().unwrap();
-                    active_file = async move {
-                        active_file.write_arrow_batch(&arrow_batch).await?;
-                        Ok::<_, anyhow::Error>(active_file)
-                    }
-                    .run_in_task(|| "ParquetFile::write_arrow_batch")
-                    .await?;
-                }
-                Err(e) => anyhow::bail!(e),
-            }
+            .await?;
             self.active_file = Some(active_file);
         }
         Ok(())
@@ -260,17 +237,6 @@ impl ParquetUploader {
 struct ParquetFile {
     writer: ArrowWriter<Vec<u8>>,
     uploader: S3MultiPartUploader,
-    max_file_size: u64,
-}
-
-#[derive(thiserror::Error, Debug)]
-pub enum ParquetFileError {
-    #[error("RecordBatch exceeds max file size limit")]
-    RecordBatchExceedsMaxFileLimit,
-    #[error(transparent)]
-    UploaderError(#[from] S3MultiPartUploadError),
-    #[error(transparent)]
-    Other(#[from] anyhow::Error),
 }
 
 impl ParquetFile {
@@ -279,7 +245,6 @@ impl ParquetFile {
         bucket: String,
         key: String,
         sdk_config: Arc<SdkConfig>,
-        max_file_size: u64,
     ) -> Result<Self, anyhow::Error> {
         // TODO: Build a WriterProperties struct with the desired parquet file properties
         // and the correct buffering strategy (configuring the row group size, etc.).
@@ -291,12 +256,8 @@ impl ParquetFile {
             key,
             S3MultiPartUploaderConfig {
                 part_size_limit: UPLOAD_MULTIPART_PART_SIZE_LIMIT.as_u64(),
-                // We are already enforcing the max size ourselves since we can't handle a
-                // `UploadExceedsMaxFileLimit` error from the library without ruining our
-                // arrow writer state, so we set the max size enforced by the uploader to the max
+                // Set the max size enforced by the uploader to the max
                 // file size it will allow based on the part size limit.
-                // This is known to be greater than the `MAX_S3_SINK_FILE_SIZE` enforced during
-                // sink creation.
                 file_size_limit: UPLOAD_MULTIPART_PART_SIZE_LIMIT
                     .as_u64()
                     .checked_mul(AWS_S3_MAX_PART_COUNT.try_into().expect("known safe"))
@@ -304,11 +265,7 @@ impl ParquetFile {
             },
         )
         .await?;
-        Ok(Self {
-            writer,
-            uploader,
-            max_file_size,
-        })
+        Ok(Self { writer, uploader })
     }
 
     async fn finish(mut self) -> Result<CompletedUpload, anyhow::Error> {
@@ -319,24 +276,7 @@ impl ParquetFile {
 
     /// Writes an arrow Record Batch to the parquet writer, then flushes the writer's buffer to
     /// the uploader which may trigger an upload.
-    async fn write_arrow_batch(
-        &mut self,
-        record_batch: &RecordBatch,
-    ) -> Result<(), ParquetFileError> {
-        // Check if the current batch would exceed the file size limit
-        // This is an estimate since RecordBatch.get_array_memory_size() doesn't equal the
-        // actual size of the serialized data.
-        if u64::cast_from(
-            self.writer.bytes_written()
-                + self.writer.in_progress_size()
-                + record_batch.get_array_memory_size(),
-        ) > self.max_file_size
-        {
-            // The current batch would exceed the file size limit
-            // so return an error to trigger a new file to be started.
-            Err(ParquetFileError::RecordBatchExceedsMaxFileLimit)?;
-        }
-
+    async fn write_arrow_batch(&mut self, record_batch: &RecordBatch) -> Result<(), anyhow::Error> {
         let before_groups = self.writer.flushed_row_groups().len();
         self.writer
             .write(record_batch)
@@ -352,7 +292,10 @@ impl ParquetFile {
         // If the writer has flushed a new row group we can steal its buffer and upload it.
         if self.writer.flushed_row_groups().len() > before_groups {
             let buffer = self.writer.inner_mut();
-            // TODO: this can return a S3MultiPartUploadError::UploadExceedsMaxFileLimit
+            // TODO: this can return a S3MultiPartUploadError::UploadExceedsMaxFileLimit if we hit
+            // the max S3 size limits. We should handle this case at some point and start a new
+            // file, but for now this limit is high enough that it should rarely be hit and we
+            // can just fail the upload.
             self.uploader.buffer_chunk(buffer.as_slice()).await?;
             // reuse the buffer in the writer
             buffer.clear();

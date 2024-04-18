@@ -357,7 +357,6 @@ pub enum CopyOptionName {
     Quote,
     Header,
     AwsConnection,
-    MaxFileSize,
 }
 
 impl AstDisplay for CopyOptionName {
@@ -370,7 +369,6 @@ impl AstDisplay for CopyOptionName {
             CopyOptionName::Quote => "QUOTE",
             CopyOptionName::Header => "HEADER",
             CopyOptionName::AwsConnection => "AWS CONNECTION",
-            CopyOptionName::MaxFileSize => "MAX FILE SIZE",
         })
     }
 }
@@ -389,8 +387,7 @@ impl WithOptionName for CopyOptionName {
             | CopyOptionName::Escape
             | CopyOptionName::Quote
             | CopyOptionName::Header
-            | CopyOptionName::AwsConnection
-            | CopyOptionName::MaxFileSize => false,
+            | CopyOptionName::AwsConnection => false,
         }
     }
 }

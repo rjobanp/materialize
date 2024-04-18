@@ -121,7 +121,6 @@ message ProtoS3SinkFormat {
 
 message ProtoS3UploadInfo {
     string uri = 1;
-    uint64 max_file_size = 2;
-    mz_repr.relation_and_scalar.ProtoRelationDesc desc = 3;
-    ProtoS3SinkFormat format = 4;
+    mz_repr.relation_and_scalar.ProtoRelationDesc desc = 2;
+    ProtoS3SinkFormat format = 3;
 }

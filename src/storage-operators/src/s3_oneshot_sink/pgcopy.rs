@@ -12,6 +12,7 @@ use aws_types::sdk_config::SdkConfig;
 use bytesize::ByteSize;
 use mz_aws_util::s3_uploader::{
     CompletedUpload, S3MultiPartUploadError, S3MultiPartUploader, S3MultiPartUploaderConfig,
+    AWS_S3_MAX_PART_COUNT,
 };
 use mz_ore::task::JoinHandleExt;
 use mz_pgcopy::{encode_copy_format, CopyFormatParams};
@@ -33,9 +34,6 @@ pub(super) struct PgCopyUploader {
     key_manager: S3KeyManager,
     /// Identifies the batch that files uploaded by this uploader belong to
     batch: u64,
-    /// The desired file size. A new file upload will be started
-    /// when the size exceeds this amount.
-    max_file_size: u64,
     /// The aws sdk config.
     /// This is an option so that we can get an owned value later to move to a
     /// spawned tokio task.
@@ -63,7 +61,6 @@ impl CopyToS3Uploader for PgCopyUploader {
                 format: format_params,
                 key_manager: S3KeyManager::new(sink_id, &connection_details.uri),
                 batch,
-                max_file_size: connection_details.max_file_size,
                 file_index: 0,
                 current_file_uploader: None,
                 buf: Vec::new(),
@@ -138,7 +135,6 @@ impl PgCopyUploader {
             .sdk_config
             .take()
             .expect("sdk_config should always be present");
-        let max_file_size = self.max_file_size;
         // Moving the aws s3 calls onto tokio tasks instead of using timely runtime.
         let handle = mz_ore::task::spawn(|| "s3_uploader::try_new", async move {
             let uploader = S3MultiPartUploader::try_new(
@@ -147,7 +143,12 @@ impl PgCopyUploader {
                 object_key,
                 S3MultiPartUploaderConfig {
                     part_size_limit: ByteSize::mib(10).as_u64(),
-                    file_size_limit: max_file_size,
+                    // Set the max size enforced by the uploader to the max
+                    // file size it will allow based on the part size limit.
+                    file_size_limit: ByteSize::mib(10)
+                        .as_u64()
+                        .checked_mul(AWS_S3_MAX_PART_COUNT.try_into().expect("known safe"))
+                        .expect("known safe"),
                 },
             )
             .await;
@@ -196,7 +197,6 @@ impl PgCopyUploader {
 /// to run `aws sso login` if you haven't recently.
 #[cfg(test)]
 mod tests {
-    use bytesize::ByteSize;
     use mz_pgcopy::CopyFormatParams;
     use mz_repr::{ColumnName, ColumnType, Datum, RelationType};
     use uuid::Uuid;
@@ -222,7 +222,7 @@ mod tests {
     #[mz_ore::test(tokio::test(flavor = "multi_thread"))]
     #[cfg_attr(coverage, ignore)] // https://github.com/MaterializeInc/materialize/issues/18898
     #[cfg_attr(miri, ignore)] // error: unsupported operation: can't call foreign function `TLS_method` on OS `linux`
-    async fn test_multiple_files() -> Result<(), anyhow::Error> {
+    async fn test_upload() -> Result<(), anyhow::Error> {
         let sdk_config = mz_aws_util::defaults().load().await;
         let (bucket, path) = match s3_bucket_path_for_test() {
             Some(tuple) => tuple,
@@ -240,8 +240,6 @@ mod tests {
             sdk_config.clone(),
             S3UploadInfo {
                 uri: format!("s3://{}/{}", bucket, path),
-                // this is only for testing, users will not be able to set value smaller than 16MB.
-                max_file_size: ByteSize::b(6).as_u64(),
                 desc,
                 format: S3SinkFormat::PgCopy(CopyFormatParams::Csv(Default::default())),
             },
@@ -249,11 +247,9 @@ mod tests {
             batch,
         )?;
         let mut row = Row::default();
-        // Even though this will exceed max_file_size, it should be successfully uploaded in a single file.
         row.packer().push(Datum::from("1234567"));
         uploader.append_row(&row).await?;
 
-        // Since the max_file_size is 6B, this row will be uploaded to a new file.
         row.packer().push(Datum::Null);
         uploader.append_row(&row).await?;
 
@@ -262,8 +258,6 @@ mod tests {
 
         uploader.flush().await?;
 
-        // Based on the max_file_size, the uploader should have uploaded two
-        // files, part-0001.csv and part-0002.csv
         let s3_client = mz_aws_util::s3::new_client(&sdk_config);
         let first_file = s3_client
             .get_object()
@@ -277,22 +271,7 @@ mod tests {
             .unwrap();
 
         let body = first_file.body.collect().await.unwrap().into_bytes();
-        let expected_body: &[u8] = b"1234567\n";
-        assert_eq!(body, *expected_body);
-
-        let second_file = s3_client
-            .get_object()
-            .bucket(bucket)
-            .key(format!(
-                "{}/mz-{}-batch-{:04}-0002.csv",
-                path, sink_id, batch
-            ))
-            .send()
-            .await
-            .unwrap();
-
-        let body = second_file.body.collect().await.unwrap().into_bytes();
-        let expected_body: &[u8] = b"\n5678\n";
+        let expected_body: &[u8] = b"1234567\n\n5678\n";
         assert_eq!(body, *expected_body);
 
         Ok(())

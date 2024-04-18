@@ -16,7 +16,6 @@ use mz_dyncfg::ConfigSet;
 use mz_persist_types::ShardId;
 use mz_pgcopy::CopyFormatParams;
 use mz_proto::{IntoRustIfSome, ProtoType, RustType, TryFromProtoError};
-use mz_repr::bytes::ByteSize;
 use mz_repr::{GlobalId, RelationDesc};
 use proptest::prelude::{any, Arbitrary, BoxedStrategy, Strategy};
 use proptest_derive::Arbitrary;
@@ -824,8 +823,6 @@ impl RustType<ProtoS3SinkFormat> for S3SinkFormat {
 pub struct S3UploadInfo {
     /// The s3 uri path to write the data to.
     pub uri: String,
-    /// The max file size of each file uploaded to S3.
-    pub max_file_size: u64,
     /// The relation desc of the data to be uploaded to S3.
     pub desc: RelationDesc,
     /// The selected sink format.
@@ -836,7 +833,6 @@ impl RustType<ProtoS3UploadInfo> for S3UploadInfo {
     fn into_proto(&self) -> ProtoS3UploadInfo {
         ProtoS3UploadInfo {
             uri: self.uri.clone(),
-            max_file_size: self.max_file_size,
             desc: Some(self.desc.into_proto()),
             format: Some(self.format.into_proto()),
         }
@@ -845,7 +841,6 @@ impl RustType<ProtoS3UploadInfo> for S3UploadInfo {
     fn from_proto(proto: ProtoS3UploadInfo) -> Result<Self, TryFromProtoError> {
         Ok(S3UploadInfo {
             uri: proto.uri,
-            max_file_size: proto.max_file_size,
             desc: proto.desc.into_rust_if_some("ProtoS3UploadInfo::desc")?,
             format: proto
                 .format
@@ -853,6 +848,3 @@ impl RustType<ProtoS3UploadInfo> for S3UploadInfo {
         })
     }
 }
-
-pub const MIN_S3_SINK_FILE_SIZE: ByteSize = ByteSize::mb(16);
-pub const MAX_S3_SINK_FILE_SIZE: ByteSize = ByteSize::gb(10);
