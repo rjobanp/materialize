@@ -7,8 +7,6 @@
 // the Business Source License, use of this software will be governed
 // by the Apache License, Version 2.0.
 
-use std::collections::BTreeMap;
-
 use anyhow::anyhow;
 use aws_sdk_s3::error::SdkError;
 use aws_sdk_s3::operation::complete_multipart_upload::CompleteMultipartUploadError;
@@ -22,6 +20,7 @@ use bytes::{Bytes, BytesMut};
 use bytesize::ByteSize;
 use mz_ore::cast::CastFrom;
 use mz_ore::error::ErrorExt;
+use mz_ore::task::{spawn, JoinHandle, JoinHandleExt};
 
 /// A multi part uploader which can upload a single object across multiple parts
 /// and keeps track of state to eventually finish the upload process.
@@ -41,8 +40,6 @@ pub struct S3MultiPartUploader {
     key: String,
     // The upload ID for the ongoing multi part upload.
     upload_id: String,
-    // State to keep track of the part number and the etags returned from AWS.
-    etags: BTreeMap<i32, String>,
     // The current part count.
     part_count: i32,
     // Number of bytes uploaded till now.
@@ -50,6 +47,8 @@ pub struct S3MultiPartUploader {
     // A buffer to accumulate data till it reaches `part_size_limit` in size, when it
     // will be uploaded as a part for the multi-part upload.
     buffer: BytesMut,
+    // The task handles for each part upload.
+    upload_handles: Vec<JoinHandle<Result<(Option<String>, i32), S3MultiPartUploadError>>>,
 }
 
 /// The smallest allowable part number (inclusive).
@@ -184,10 +183,10 @@ impl S3MultiPartUploader {
             key,
             upload_id,
             part_count: 0,
-            etags: Default::default(),
             total_bytes_uploaded: 0,
             buffer: Default::default(),
             config,
+            upload_handles: Default::default(),
         })
     }
 
@@ -232,16 +231,22 @@ impl S3MultiPartUploader {
             return Err(S3MultiPartUploadError::AtLeastMinPartNumber);
         }
 
-        let parts: Vec<CompletedPart> = self
-            .etags
-            .iter()
-            .map(|(part_num, etag)| {
-                CompletedPart::builder()
-                    .e_tag(etag)
-                    .part_number(*part_num)
-                    .build()
-            })
-            .collect();
+        let mut parts: Vec<CompletedPart> = Vec::with_capacity(self.upload_handles.len());
+        for handle in self.upload_handles {
+            let (etag, part_num) = handle.wait_and_assert_finished().await?;
+            match etag {
+                Some(etag) => {
+                    parts.push(
+                        CompletedPart::builder()
+                            .e_tag(etag)
+                            .part_number(part_num)
+                            .build(),
+                    );
+                }
+                None => Err(anyhow!("etag for part {part_num} is None"))?,
+            }
+        }
+
         self.client
             .complete_multipart_upload()
             .bucket(&self.bucket)
@@ -299,24 +304,25 @@ impl S3MultiPartUploader {
         if next_part_number > AWS_S3_MAX_PART_COUNT {
             return Err(S3MultiPartUploadError::ExceedsMaxPartNumber);
         }
+        let client = self.client.clone();
+        let bucket = self.bucket.clone();
+        let key = self.key.clone();
+        let upload_id = self.upload_id.clone();
 
-        // TODO: Spawn this on a new task to make it parallel.
-        let res = self
-            .client
-            .upload_part()
-            .bucket(&self.bucket)
-            .key(&self.key)
-            .upload_id(self.upload_id.clone())
-            .part_number(next_part_number)
-            .body(ByteStream::from(data))
-            .send()
-            .await?;
+        let handle = spawn(|| "s3::upload_part", async move {
+            let res = client
+                .upload_part()
+                .bucket(&bucket)
+                .key(&key)
+                .upload_id(upload_id.clone())
+                .part_number(next_part_number)
+                .body(ByteStream::from(data))
+                .send()
+                .await?;
+            Ok((res.e_tag, next_part_number))
+        });
+        self.upload_handles.push(handle);
 
-        self.etags.insert(
-            next_part_number,
-            res.e_tag
-                .ok_or(anyhow!("upload_part response missing etag"))?,
-        );
         self.part_count = next_part_number;
         self.total_bytes_uploaded += num_of_bytes;
         Ok(())
