@@ -78,7 +78,7 @@ mz-tracing = { path = "../tracing", optional = true }
 nix = "0.26.1"
 num_cpus = "1.14.0"
 openssl = { version = "0.10.48", features = ["vendored"] }
-openssl-sys = { version = "0.9.80", features = ["vendored"] }
+openssl-sys = { version = "0.9.102", features = ["vendored"] }
 opentelemetry = { version = "0.21.0", features = ["trace"] }
 opentelemetry_sdk = { version = "0.21.2", features = ["rt-tokio"] }
 pin-project = "1.0.12"
