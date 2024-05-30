@@ -679,6 +679,13 @@ user-id = 3618
 user-login = "dtolnay"
 user-name = "David Tolnay"
 
+[[publisher.serde_derive]]
+version = "1.0.202"
+when = "2024-05-15"
+user-id = 3618
+user-login = "dtolnay"
+user-name = "David Tolnay"
+
 [[publisher.serde_derive_internals]]
 version = "0.26.0"
 when = "2021-04-09"
