@@ -51,12 +51,7 @@ async fn basic() -> Result<(), anyhow::Error> {
 
     let mut instance = RocksDBInstance::<String, String>::new(
         t.path(),
-        InstanceOptions::<bincode::DefaultOptions, String, StubMergeOperator<String>>::new(
-            rocksdb::Env::new()?,
-            2,
-            None,
-            bincode::DefaultOptions::new(),
-        ),
+        InstanceOptions::<String, StubMergeOperator<String>>::new(rocksdb::Env::new()?, 2, None),
         RocksDBConfig::new(Default::default(), None),
         shared_metrics_for_tests()?,
         instance_metrics_for_tests()?,
@@ -136,7 +131,7 @@ async fn associative_merge_operator_test() -> Result<(), anyhow::Error> {
 
     // A simple merge operator that adds all merge values to the existing key
     // value, if any.
-    fn merge(_key: &[u8], operands: ValueIterator<bincode::DefaultOptions, u32>) -> u32 {
+    fn merge(_key: &[u8], operands: ValueIterator<u32>) -> u32 {
         let mut val = 0;
 
         for op in operands {
@@ -145,12 +140,8 @@ async fn associative_merge_operator_test() -> Result<(), anyhow::Error> {
         val
     }
 
-    let static_options = InstanceOptions::new(
-        rocksdb::Env::new()?,
-        2,
-        Some(("test".to_string(), merge)),
-        bincode::DefaultOptions::new(),
-    );
+    let static_options =
+        InstanceOptions::new(rocksdb::Env::new()?, 2, Some(("test".to_string(), merge)));
 
     let mut instance = RocksDBInstance::<String, u32>::new(
         t.path(),
@@ -266,12 +257,7 @@ async fn update_operation_stats_test() -> Result<(), anyhow::Error> {
 
     let mut instance = RocksDBInstance::<String, String>::new(
         t.path().join("5").as_path(),
-        InstanceOptions::<bincode::DefaultOptions, String, StubMergeOperator<String>>::new(
-            rocksdb::Env::new()?,
-            2,
-            None,
-            bincode::DefaultOptions::new(),
-        ),
+        InstanceOptions::<String, StubMergeOperator<String>>::new(rocksdb::Env::new()?, 2, None),
         RocksDBConfig::new(Default::default(), None),
         shared_metrics_for_tests()?,
         instance_metrics_for_tests()?,
@@ -326,12 +312,7 @@ async fn shared_write_buffer_manager() -> Result<(), anyhow::Error> {
 
     let instance1 = RocksDBInstance::<String, String>::new(
         t.path().join("1").as_path(),
-        InstanceOptions::<bincode::DefaultOptions, String, StubMergeOperator<String>>::new(
-            rocksdb::Env::new()?,
-            2,
-            None,
-            bincode::DefaultOptions::new(),
-        ),
+        InstanceOptions::<String, StubMergeOperator<String>>::new(rocksdb::Env::new()?, 2, None),
         rocksdb_config.clone(),
         shared_metrics_for_tests()?,
         instance_metrics_for_tests()?,
@@ -352,12 +333,7 @@ async fn shared_write_buffer_manager() -> Result<(), anyhow::Error> {
 
     let instance2 = RocksDBInstance::<String, String>::new(
         t.path().join("2").as_path(),
-        InstanceOptions::<bincode::DefaultOptions, String, StubMergeOperator<String>>::new(
-            rocksdb::Env::new()?,
-            2,
-            None,
-            bincode::DefaultOptions::new(),
-        ),
+        InstanceOptions::<String, StubMergeOperator<String>>::new(rocksdb::Env::new()?, 2, None),
         rocksdb_config.clone(),
         shared_metrics_for_tests()?,
         instance_metrics_for_tests()?,
@@ -381,12 +357,7 @@ async fn shared_write_buffer_manager() -> Result<(), anyhow::Error> {
 
     let instance3 = RocksDBInstance::<String, String>::new(
         t.path().join("3").as_path(),
-        InstanceOptions::<bincode::DefaultOptions, String, StubMergeOperator<String>>::new(
-            rocksdb::Env::new()?,
-            2,
-            None,
-            bincode::DefaultOptions::new(),
-        ),
+        InstanceOptions::<String, StubMergeOperator<String>>::new(rocksdb::Env::new()?, 2, None),
         rocksdb_config,
         shared_metrics_for_tests()?,
         instance_metrics_for_tests()?,

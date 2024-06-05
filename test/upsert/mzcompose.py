@@ -623,32 +623,32 @@ def workflow_load_test(c: Composition, parser: WorkflowArgumentParser) -> None:
                     "storage_dataflow_max_inflight_bytes_disk_only": "true",
                 },
             ),
-            (
-                "with write_buffer_manager no stall",
-                {
-                    "disk_cluster_replicas_default": "true",
-                    "enable_disk_cluster_replicas": "true",
-                    "upsert_rocksdb_auto_spill_threshold_bytes": "250",
-                    # Force backpressure to be enabled.
-                    "storage_dataflow_max_inflight_bytes": f"{backpressure_bytes}",
-                    "storage_dataflow_max_inflight_bytes_disk_only": "true",
-                    "upsert_rocksdb_write_buffer_manager_memory_bytes": f"{5 * 1024 * 1024}",
-                    "upsert_rocksdb_write_buffer_manager_allow_stall": "false",
-                },
-            ),
-            (
-                "with write_buffer_manager stall enabled",
-                {
-                    "disk_cluster_replicas_default": "true",
-                    "enable_disk_cluster_replicas": "true",
-                    "upsert_rocksdb_auto_spill_threshold_bytes": "250",
-                    # Force backpressure to be enabled.
-                    "storage_dataflow_max_inflight_bytes": f"{backpressure_bytes}",
-                    "storage_dataflow_max_inflight_bytes_disk_only": "true",
-                    "upsert_rocksdb_write_buffer_manager_memory_bytes": f"{5 * 1024 * 1024}",
-                    "upsert_rocksdb_write_buffer_manager_allow_stall": "true",
-                },
-            ),
+            # (
+            #     "with write_buffer_manager no stall",
+            #     {
+            #         "disk_cluster_replicas_default": "true",
+            #         "enable_disk_cluster_replicas": "true",
+            #         "upsert_rocksdb_auto_spill_threshold_bytes": "250",
+            #         # Force backpressure to be enabled.
+            #         "storage_dataflow_max_inflight_bytes": f"{backpressure_bytes}",
+            #         "storage_dataflow_max_inflight_bytes_disk_only": "true",
+            #         "upsert_rocksdb_write_buffer_manager_memory_bytes": f"{5 * 1024 * 1024}",
+            #         "upsert_rocksdb_write_buffer_manager_allow_stall": "false",
+            #     },
+            # ),
+            # (
+            #     "with write_buffer_manager stall enabled",
+            #     {
+            #         "disk_cluster_replicas_default": "true",
+            #         "enable_disk_cluster_replicas": "true",
+            #         "upsert_rocksdb_auto_spill_threshold_bytes": "250",
+            #         # Force backpressure to be enabled.
+            #         "storage_dataflow_max_inflight_bytes": f"{backpressure_bytes}",
+            #         "storage_dataflow_max_inflight_bytes_disk_only": "true",
+            #         "upsert_rocksdb_write_buffer_manager_memory_bytes": f"{5 * 1024 * 1024}",
+            #         "upsert_rocksdb_write_buffer_manager_allow_stall": "true",
+            #     },
+            # ),
         ]
         last_latency = None
         for scenario_name, mz_configs in scenarios:

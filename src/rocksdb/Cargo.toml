@@ -11,7 +11,7 @@ workspace = true
 
 [dependencies]
 anyhow = "1.0.66"
-bincode = { version = "1.3.3" }
+bitcode = { version = "0.6.0", features = ["serde"]}
 derivative = "2.2.0"
 itertools = { version = "0.10.5" }
 once_cell = "1.16.0"
