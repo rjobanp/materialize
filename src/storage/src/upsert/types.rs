@@ -88,7 +88,6 @@ use std::num::Wrapping;
 use std::sync::Arc;
 use std::time::Instant;
 
-use bincode::Options;
 use itertools::Itertools;
 use mz_ore::cast::CastFrom;
 use mz_ore::error::ErrorExt;
@@ -97,17 +96,6 @@ use serde::{de::DeserializeOwned, Serialize};
 use super::{UpsertKey, UpsertValue};
 use crate::metrics::upsert::{UpsertMetrics, UpsertSharedMetrics};
 use crate::statistics::SourceStatistics;
-
-/// The default set of `bincode` options used for consolidating
-/// upsert snapshots (and writing values to RocksDB).
-pub type BincodeOpts = bincode::config::DefaultOptions;
-
-/// Build the default `BincodeOpts`.
-pub fn upsert_bincode_opts() -> BincodeOpts {
-    // We don't allow trailing bytes, for now,
-    // and use varint encoding for space saving.
-    bincode::DefaultOptions::new()
-}
 
 /// The result type for `multi_get`.
 /// The value and size are stored in individual `Option`s so callees
@@ -312,13 +300,7 @@ impl<O: Default> StateValue<O> {
     /// guarantee that we're not decoding garbage is more than worth it.
     /// The main key->value used to store previous values.
     #[allow(clippy::as_conversions)]
-    pub fn merge_update(
-        &mut self,
-        value: UpsertValue,
-        diff: mz_repr::Diff,
-        bincode_opts: BincodeOpts,
-        bincode_buffer: &mut Vec<u8>,
-    ) -> bool {
+    pub fn merge_update(&mut self, value: UpsertValue, diff: mz_repr::Diff) -> bool {
         if let Self::Snapshotting(Snapshotting {
             value_xor,
             len_sum,
@@ -326,16 +308,13 @@ impl<O: Default> StateValue<O> {
             diff_sum,
         }) = self
         {
-            bincode_buffer.clear();
-            bincode_opts
-                .serialize_into(&mut *bincode_buffer, &value)
-                .unwrap();
+            let mut bincode_buffer = bitcode::serialize(&value).unwrap();
             let len = i64::try_from(bincode_buffer.len()).unwrap();
 
             *diff_sum += diff;
             *len_sum += len.wrapping_mul(diff);
             // Truncation is fine (using `as`) as this is just a checksum
-            *checksum_sum += (seahash::hash(&*bincode_buffer) as i64).wrapping_mul(diff);
+            *checksum_sum += (seahash::hash(&bincode_buffer) as i64).wrapping_mul(diff);
 
             // XOR of even diffs cancel out, so we only do it if diff is odd
             if diff.abs() % 2 == 1 {
@@ -394,7 +373,7 @@ impl<O: Default> StateValue<O> {
     /// Afterwards, if we need to retract one of these values, we need to assert that its in this correct state,
     /// then mutate it to its `Value` state, so the `upsert` operator can use it.
     #[allow(clippy::as_conversions)]
-    pub fn ensure_decoded(&mut self, bincode_opts: BincodeOpts) {
+    pub fn ensure_decoded(&mut self) {
         match self {
             StateValue::Snapshotting(snapshotting) => {
                 match snapshotting.diff_sum.0 {
@@ -428,7 +407,7 @@ impl<O: Default> StateValue<O> {
                             snapshotting
                         );
                         *self = Self::Value(Value::Value(
-                            bincode_opts.deserialize(value).unwrap(),
+                            bitcode::deserialize(*value).unwrap(),
                             Default::default(),
                         ));
                     }
@@ -755,11 +734,6 @@ pub struct UpsertState<'metrics, S, O> {
     // User-facing statistics.
     stats: SourceStatistics,
 
-    // Bincode options and buffer used
-    // in `consolidate_snapshot_chunk`.
-    bincode_opts: BincodeOpts,
-    bincode_buffer: Vec<u8>,
-
     // We need to iterate over `updates` in `consolidate_snapshot_chunk`
     // twice, so we have a scratch vector for this.
     consolidate_scratch: Vec<(UpsertKey, UpsertValue, mz_repr::Diff)>,
@@ -786,8 +760,6 @@ impl<'metrics, S, O> UpsertState<'metrics, S, O> {
             metrics,
             worker_metrics,
             stats,
-            bincode_opts: upsert_bincode_opts(),
-            bincode_buffer: Vec::new(),
             consolidate_scratch: Vec::new(),
             consolidate_upsert_scratch: indexmap::IndexMap::new(),
             multi_get_scratch: Vec::new(),
@@ -949,7 +921,7 @@ where
                     // Transform into a `StateValue<O>` that can be used by the `snapshot_merge_function`
                     // to merge with any existing value for the key.
                     let mut val: StateValue<O> = Default::default();
-                    val.merge_update(v, diff, self.bincode_opts, &mut self.bincode_buffer);
+                    val.merge_update(v, diff);
 
                     stats.updates += 1;
                     if diff > 0 {
@@ -1017,7 +989,7 @@ where
                 let entry = self.consolidate_upsert_scratch.get_mut(&key).unwrap();
                 let val = entry.value.get_or_insert_with(Default::default);
 
-                if val.merge_update(value, diff, self.bincode_opts, &mut self.bincode_buffer) {
+                if val.merge_update(value, diff) {
                     entry.value = None;
                 }
             }
@@ -1130,22 +1102,19 @@ mod tests {
     use super::*;
     #[mz_ore::test]
     fn test_merge_update() {
-        let mut buf = Vec::new();
-        let opts = upsert_bincode_opts();
-
         let mut s = StateValue::<()>::Snapshotting(Snapshotting::default());
 
         let small_row = Ok(mz_repr::Row::default());
         let longer_row = Ok(mz_repr::Row::pack([mz_repr::Datum::Null]));
-        s.merge_update(small_row, 1, opts, &mut buf);
-        s.merge_update(longer_row.clone(), -1, opts, &mut buf);
+        s.merge_update(small_row, 1);
+        s.merge_update(longer_row.clone(), -1);
         // This clears the retraction of the `longer_row`, but the
         // `value_xor` is the length of the `longer_row`. This tests
         // that we are tracking checksums correctly.
-        s.merge_update(longer_row, 1, opts, &mut buf);
+        s.merge_update(longer_row, 1);
 
         // Assert that the `Snapshotting` value is fully merged.
-        s.ensure_decoded(opts);
+        s.ensure_decoded();
     }
 
     #[mz_ore::test]
@@ -1153,17 +1122,14 @@ mod tests {
         expected = "invalid upsert state: len_sum is non-0, state: Snapshotting { len_sum: 1"
     )]
     fn test_merge_update_len_0_assert() {
-        let mut buf = Vec::new();
-        let opts = upsert_bincode_opts();
-
         let mut s = StateValue::<()>::Snapshotting(Snapshotting::default());
 
         let small_row = Ok(mz_repr::Row::default());
         let longer_row = Ok(mz_repr::Row::pack([mz_repr::Datum::Null]));
-        s.merge_update(longer_row.clone(), 1, opts, &mut buf);
-        s.merge_update(small_row.clone(), -1, opts, &mut buf);
+        s.merge_update(longer_row.clone(), 1);
+        s.merge_update(small_row.clone(), -1);
 
-        s.ensure_decoded(opts);
+        s.ensure_decoded();
     }
 
     #[mz_ore::test]
@@ -1171,34 +1137,28 @@ mod tests {
         expected = "invalid upsert state: \"value_xor is not the same length (3) as len (4), state: Snapshotting { len_sum: 4"
     )]
     fn test_merge_update_len_to_long_assert() {
-        let mut buf = Vec::new();
-        let opts = upsert_bincode_opts();
-
         let mut s = StateValue::<()>::Snapshotting(Snapshotting::default());
 
         let small_row = Ok(mz_repr::Row::default());
         let longer_row = Ok(mz_repr::Row::pack([mz_repr::Datum::Null]));
-        s.merge_update(longer_row.clone(), 1, opts, &mut buf);
-        s.merge_update(small_row.clone(), -1, opts, &mut buf);
-        s.merge_update(longer_row.clone(), 1, opts, &mut buf);
+        s.merge_update(longer_row.clone(), 1);
+        s.merge_update(small_row.clone(), -1);
+        s.merge_update(longer_row.clone(), 1);
 
-        s.ensure_decoded(opts);
+        s.ensure_decoded();
     }
 
     #[mz_ore::test]
     #[should_panic(expected = "invalid upsert state: checksum_sum does not match")]
     fn test_merge_update_checksum_doesnt_match() {
-        let mut buf = Vec::new();
-        let opts = upsert_bincode_opts();
-
         let mut s = StateValue::<()>::Snapshotting(Snapshotting::default());
 
         let small_row = Ok(mz_repr::Row::pack([mz_repr::Datum::Int64(2)]));
         let longer_row = Ok(mz_repr::Row::pack([mz_repr::Datum::Int64(1)]));
-        s.merge_update(longer_row.clone(), 1, opts, &mut buf);
-        s.merge_update(small_row.clone(), -1, opts, &mut buf);
-        s.merge_update(longer_row.clone(), 1, opts, &mut buf);
+        s.merge_update(longer_row.clone(), 1);
+        s.merge_update(small_row.clone(), -1);
+        s.merge_update(longer_row.clone(), 1);
 
-        s.ensure_decoded(opts);
+        s.ensure_decoded();
     }
 }

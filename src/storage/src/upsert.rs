@@ -48,10 +48,7 @@ use crate::render::sources::OutputIndex;
 use crate::storage_state::StorageInstanceContext;
 use autospill::AutoSpillBackend;
 use memory::InMemoryHashMap;
-use types::{
-    snapshot_merge_function, upsert_bincode_opts, BincodeOpts, StateValue, UpsertState,
-    UpsertStateBackend, Value,
-};
+use types::{snapshot_merge_function, StateValue, UpsertState, UpsertStateBackend, Value};
 
 mod autospill;
 mod memory;
@@ -290,7 +287,7 @@ where
             let merge_operator = if rocksdb_use_native_merge_operator {
                 Some((
                     "upsert_state_snapshot_merge_v1".to_string(),
-                    |a: &[u8], b: ValueIterator<BincodeOpts, StateValue<Option<FromTime>>>| {
+                    |a: &[u8], b: ValueIterator<StateValue<Option<FromTime>>>| {
                         snapshot_merge_function::<Option<FromTime>>(a.into(), b)
                     },
                 ))
@@ -300,14 +297,7 @@ where
             rocksdb::RocksDB::new(
                 mz_rocksdb::RocksDBInstance::new(
                     &rocksdb_dir,
-                    mz_rocksdb::InstanceOptions::new(
-                        env,
-                        rocksdb_cleanup_tries,
-                        merge_operator,
-                        // For now, just use the same config as the one used for
-                        // merging snapshots.
-                        upsert_bincode_opts(),
-                    ),
+                    mz_rocksdb::InstanceOptions::new(env, rocksdb_cleanup_tries, merge_operator),
                     tuning,
                     rocksdb_shared_metrics,
                     rocksdb_instance_metrics,
@@ -527,7 +517,6 @@ async fn drain_staged_input<S, G, T, FromTime, E>(
         a_ts == b_ts && a_key == b_key
     });
 
-    let bincode_opts = types::upsert_bincode_opts();
     // Upsert the values into `commands_state`, by recording the latest
     // value (or deletion). These will be synced at the end to the `state`.
     //
@@ -550,7 +539,7 @@ async fn drain_staged_input<S, G, T, FromTime, E>(
         let existing_value = &mut command_state.get_mut().value;
 
         if let Some(cs) = existing_value.as_mut() {
-            cs.ensure_decoded(bincode_opts);
+            cs.ensure_decoded();
         }
 
         // Skip this command if its order key is below the one in the upsert state.
