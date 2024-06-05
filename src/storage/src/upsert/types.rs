@@ -171,28 +171,29 @@ pub struct MergeValue<V> {
 /// `O` typically required to be `: Default`, with the default value sorting below all others.
 /// Values consolidated during snapshotting consolidate correctly (as they are actual
 /// differential updates with diffs), so order keys are not required.
-#[derive(Clone, serde::Serialize, serde::Deserialize, Debug)]
+#[derive(Clone, bitcode::Encode, bitcode::Decode, Debug)]
 pub enum StateValue<O> {
     Snapshotting(Snapshotting),
+    #[bitcode(with_serde)]
     Value(Value<O>),
 }
 
 /// A totally consolidated value stored within the `UpsertStateBackend`.
 ///
 /// This type contains support for _tombstones_, that contain an _order key_.
-#[derive(Clone, serde::Serialize, serde::Deserialize, Debug)]
+#[derive(Clone, bitcode::Encode, bitcode::Decode, Debug)]
 pub enum Value<O> {
     Value(UpsertValue, O),
     Tombstone(O),
 }
 
 /// A value as produced during consolidation of a snapshot.
-#[derive(Clone, Default, serde::Serialize, serde::Deserialize, Debug)]
+#[derive(Clone, Default, bitcode::Encode, bitcode::Decode, Debug)]
 pub struct Snapshotting {
     value_xor: Vec<u8>,
-    len_sum: Wrapping<i64>,
-    checksum_sum: Wrapping<i64>,
-    diff_sum: Wrapping<i64>,
+    len_sum: i64,
+    checksum_sum: i64,
+    diff_sum: i64,
 }
 
 impl fmt::Display for Snapshotting {

@@ -997,6 +997,28 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "349f9b6a179ed607305526ca489b34ad0a41aed5f7980fa90eb03160b69598fb"
 
 [[package]]
+name = "bitcode"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "48bc1c27654127a24c476d40198746860ef56475f41a601bfa5c4d0f832968f0"
+dependencies = [
+ "bitcode_derive",
+ "bytemuck",
+ "serde",
+]
+
+[[package]]
+name = "bitcode_derive"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2966755a19aad59ee2aae91e2d48842c667a99d818ec72168efdab07200701cc"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.63",
+]
+
+[[package]]
 name = "bitflags"
 version = "1.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1095,6 +1117,12 @@ checksum = "590b1af059a21c47d4da7cd11f05e08b1992b58b5b4acf2a5e10d7e53aed3d74"
 dependencies = [
  "regex",
 ]
+
+[[package]]
+name = "bytemuck"
+version = "1.16.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "78834c15cb5d5efe3452d58b1e8ba890dd62d21907f867f383358198e56ebca5"
 
 [[package]]
 name = "byteorder"
@@ -5690,7 +5718,7 @@ name = "mz-rocksdb"
 version = "0.0.0"
 dependencies = [
  "anyhow",
- "bincode",
+ "bitcode",
  "derivative",
  "itertools",
  "mz-build-tools",
@@ -5705,8 +5733,6 @@ dependencies = [
  "prost",
  "prost-build",
  "rocksdb",
- "serde",
- "serde_json",
  "tempfile",
  "thiserror",
  "tokio",
@@ -6051,7 +6077,7 @@ dependencies = [
  "async-stream",
  "async-trait",
  "axum",
- "bincode",
+ "bitcode",
  "bytes",
  "bytesize",
  "chrono",
@@ -6268,6 +6294,7 @@ dependencies = [
  "aws-sdk-sts",
  "aws-types",
  "base64 0.13.1",
+ "bitcode",
  "bytes",
  "criterion",
  "dec",

@@ -300,14 +300,7 @@ where
             rocksdb::RocksDB::new(
                 mz_rocksdb::RocksDBInstance::new(
                     &rocksdb_dir,
-                    mz_rocksdb::InstanceOptions::new(
-                        env,
-                        rocksdb_cleanup_tries,
-                        merge_operator,
-                        // For now, just use the same config as the one used for
-                        // merging snapshots.
-                        upsert_bincode_opts(),
-                    ),
+                    mz_rocksdb::InstanceOptions::new(env, rocksdb_cleanup_tries, merge_operator),
                     tuning,
                     rocksdb_shared_metrics,
                     rocksdb_instance_metrics,

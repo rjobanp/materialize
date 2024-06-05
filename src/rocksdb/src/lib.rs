@@ -29,8 +29,6 @@ use mz_ore::retry::{Retry, RetryResult};
 use prometheus::core::AtomicU64;
 use rocksdb::merge_operator::MergeOperandsIter;
 use rocksdb::{Env, Error as RocksDBError, ErrorKind, Options as RocksDBOptions, WriteOptions, DB};
-use serde::de::DeserializeOwned;
-use serde::Serialize;
 use tokio::sync::{mpsc, oneshot};
 
 pub mod config;
@@ -52,7 +50,7 @@ pub enum Error {
 
     /// Error decoding a value previously written.
     #[error("failed to decode value")]
-    DecodeError(#[from] bincode::Error),
+    DecodeError(#[from] bitcode::Error),
 
     /// A tokio thread used by the implementation panicked.
     #[error("tokio thread panicked")]
@@ -70,38 +68,32 @@ pub enum Error {
 /// An iterator over operand values to merge for a key in RocksDB.
 /// By convention the first value will be the existing value
 /// if it was present.
-pub struct ValueIterator<'a, O, V>
+pub struct ValueIterator<'a, V>
 where
-    O: bincode::Options + Copy + Send + Sync + 'static,
-    V: DeserializeOwned + Serialize + Send + Sync + 'static,
+    V: bitcode::DecodeOwned + bitcode::Encode + Send + Sync + 'static,
 {
     iter: std::iter::Chain<std::option::IntoIter<&'a [u8]>, MergeOperandsIter<'a>>,
-    bincode: &'a O,
     v: std::marker::PhantomData<V>,
 }
 
-impl<O, V> Iterator for ValueIterator<'_, O, V>
+impl<V> Iterator for ValueIterator<'_, V>
 where
-    O: bincode::Options + Copy + Send + Sync + 'static,
-    V: DeserializeOwned + Serialize + Send + Sync + 'static,
+    V: bitcode::DecodeOwned + bitcode::Encode + Send + Sync + 'static,
 {
     type Item = V;
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.iter
-            .next()
-            .map(|v| self.bincode.deserialize(v).unwrap())
+        self.iter.next().map(|v| bitcode::decode(v).unwrap())
     }
 }
 
 /// Helper type stub to satisfy generic bounds when initializing a `InstanceOptions` without a
 /// defined merge operator.
-pub type StubMergeOperator<V> =
-    fn(key: &[u8], operands: ValueIterator<bincode::DefaultOptions, V>) -> V;
+pub type StubMergeOperator<V> = fn(key: &[u8], operands: ValueIterator<V>) -> V;
 
 /// Fixed options to configure a [`RocksDBInstance`]. These are not tuning parameters,
 /// see the `config` modules for tuning. These are generally fixed within the binary.
-pub struct InstanceOptions<O, V, F> {
+pub struct InstanceOptions<V, F> {
     /// Whether or not to clear state at the instance
     /// path before starting.
     pub cleanup_on_new: bool,
@@ -117,9 +109,6 @@ pub struct InstanceOptions<O, V, F> {
     /// A possibly shared RocksDB `Env`.
     pub env: Env,
 
-    /// The bincode options to use for serializing and deserializing values.
-    pub bincode: O,
-
     /// A merge operator to use for associative merges, if any. The first
     /// item is the name of the operator to store in RocksDB for
     /// compatibility checks, and the second is the merge function.
@@ -128,18 +117,16 @@ pub struct InstanceOptions<O, V, F> {
     v: std::marker::PhantomData<V>,
 }
 
-impl<O, V, F> InstanceOptions<O, V, F>
+impl<V, F> InstanceOptions<V, F>
 where
-    O: bincode::Options + Copy + Send + Sync + 'static,
-    V: DeserializeOwned + Serialize + Send + Sync + 'static,
-    F: for<'a> Fn(&'a [u8], ValueIterator<'a, O, V>) -> V + Copy + Send + Sync + 'static,
+    V: bitcode::DecodeOwned + bitcode::Encode + Send + Sync + 'static,
+    F: for<'a> Fn(&'a [u8], ValueIterator<'a, V>) -> V + Copy + Send + Sync + 'static,
 {
     /// A new `Options` object with reasonable defaults.
     pub fn new(
         env: rocksdb::Env,
         cleanup_tries: usize,
         merge_operator: Option<(String, F)>,
-        bincode: O,
     ) -> Self {
         InstanceOptions {
             cleanup_on_new: true,
@@ -147,7 +134,6 @@ where
             use_wal: false,
             env,
             merge_operator,
-            bincode,
             v: std::marker::PhantomData,
         }
     }
@@ -164,7 +150,6 @@ where
         options.set_env(&self.env);
 
         if let Some((fn_name, merge_fn)) = &self.merge_operator {
-            let bincode = self.bincode.clone();
             let merge_fn = merge_fn.clone();
             // We use an associative merge operator which is used for both full/partial merges
             // since the value type is always the same for puts and merges.
@@ -173,13 +158,12 @@ where
             options.set_merge_operator_associative(fn_name, move |key, existing, operands| {
                 let operands = ValueIterator {
                     iter: existing.into_iter().chain(operands.iter()).into_iter(),
-                    bincode: &bincode,
                     v: std::marker::PhantomData::<V>,
                 };
                 let result = merge_fn(key, operands);
                 // NOTE: While the API specifies the return type as Option<Vec<u8>>, returning a None
                 // will cause rocksdb to throw a corruption error and SIGABRT the process.
-                Some(bincode.serialize(&result).unwrap())
+                Some(bitcode::encode(&result))
             });
         }
 
@@ -332,27 +316,25 @@ pub struct RocksDBInstance<K, V> {
 impl<K, V> RocksDBInstance<K, V>
 where
     K: AsRef<[u8]> + Send + Sync + 'static,
-    V: Serialize + DeserializeOwned + Send + Sync + 'static,
+    V: bitcode::DecodeOwned + bitcode::Encode + Send + Sync + 'static,
 {
     /// Start a new RocksDB instance at the path, using
     /// the `Options` and `RocksDBTuningParameters` to
     /// configure the instance.
     ///
     /// `metrics` is a set of metric types that this type will keep
-    /// up to date. `enc_opts` is the `bincode` options used to
-    /// serialize and deserialize the keys and values.
-    pub async fn new<M, O, IM, F>(
+    /// up to date.
+    pub async fn new<M, IM, F>(
         instance_path: &Path,
-        options: InstanceOptions<O, V, F>,
+        options: InstanceOptions<V, F>,
         tuning_config: RocksDBConfig,
         shared_metrics: M,
         instance_metrics: IM,
     ) -> Result<Self, Error>
     where
-        O: bincode::Options + Copy + Send + Sync + 'static,
         M: Deref<Target = RocksDBSharedMetrics> + Send + 'static,
         IM: Deref<Target = RocksDBInstanceMetrics> + Send + 'static,
-        F: for<'a> Fn(&'a [u8], ValueIterator<'a, O, V>) -> V + Copy + Send + Sync + 'static,
+        F: for<'a> Fn(&'a [u8], ValueIterator<'a, V>) -> V + Copy + Send + Sync + 'static,
     {
         let dynamic_config = tuning_config.dynamic.clone();
         let supports_merges = options.merge_operator.is_some();
@@ -613,8 +595,8 @@ where
     }
 }
 
-fn rocksdb_core_loop<K, V, M, O, IM, F>(
-    options: InstanceOptions<O, V, F>,
+fn rocksdb_core_loop<K, V, M, IM, F>(
+    options: InstanceOptions<V, F>,
     tuning_config: RocksDBConfig,
     instance_path: PathBuf,
     mut cmd_rx: mpsc::Receiver<Command<K, V>>,
@@ -623,10 +605,9 @@ fn rocksdb_core_loop<K, V, M, O, IM, F>(
     creation_error_tx: oneshot::Sender<Error>,
 ) where
     K: AsRef<[u8]> + Send + Sync + 'static,
-    V: Serialize + DeserializeOwned + Send + Sync + 'static,
+    V: bitcode::DecodeOwned + bitcode::Encode + Send + Sync + 'static,
     M: Deref<Target = RocksDBSharedMetrics> + Send + 'static,
-    O: bincode::Options + Copy + Send + Sync + 'static,
-    F: for<'a> Fn(&'a [u8], ValueIterator<'a, O, V>) -> V + Send + Sync + Copy + 'static,
+    F: for<'a> Fn(&'a [u8], ValueIterator<'a, V>) -> V + Send + Sync + Copy + 'static,
     IM: Deref<Target = RocksDBInstanceMetrics> + Send + 'static,
 {
     let retry_max_duration = tuning_config.retry_max_duration;
@@ -664,8 +645,7 @@ fn rocksdb_core_loop<K, V, M, O, IM, F>(
         }
     };
 
-    let mut encoded_batch_buffers: Vec<Option<Vec<u8>>> = Vec::new();
-    let mut encoded_batch: Vec<(K, KeyUpdate<Vec<u8>>)> = Vec::new();
+    let mut encoded_batch_buffers: Vec<bitcode::Buffer> = Vec::new();
 
     let wo = options.as_rocksdb_write_options();
 
@@ -725,21 +705,18 @@ fn rocksdb_core_loop<K, V, M, O, IM, F>(
                         let mut returned_gets: u64 = 0;
                         for previous_value in gets {
                             let get_result = match previous_value {
-                                Some(previous_value) => {
-                                    match options.bincode.deserialize(&previous_value) {
-                                        Ok(value) => {
-                                            let size = u64::cast_from(previous_value.len());
-                                            processed_gets_size += size;
-                                            returned_gets += 1;
-                                            Some(GetResult { value, size })
-                                        }
-                                        Err(e) => {
-                                            let _ =
-                                                response_sender.send(Err(Error::DecodeError(e)));
-                                            return;
-                                        }
+                                Some(previous_value) => match bitcode::decode(&previous_value) {
+                                    Ok(value) => {
+                                        let size = u64::cast_from(previous_value.len());
+                                        processed_gets_size += size;
+                                        returned_gets += 1;
+                                        Some(GetResult { value, size })
                                     }
-                                }
+                                    Err(e) => {
+                                        let _ = response_sender.send(Err(Error::DecodeError(e)));
+                                        return;
+                                    }
+                                },
                                 None => None,
                             };
                             results_scratch.push(get_result);
@@ -780,8 +757,9 @@ fn rocksdb_core_loop<K, V, M, O, IM, F>(
                 // initialize and push values into the buffer to match the batch size
                 let buf_size = encoded_batch_buffers.len();
                 for _ in buf_size..batch_size {
-                    encoded_batch_buffers.push(Some(Vec::new()));
+                    encoded_batch_buffers.push(bitcode::Buffer::new());
                 }
+
                 // shrinking the buffers in case the scratch buffer's capacity is significantly
                 // more than the size of batch
                 if tuning_config.shrink_buffers_by_ratio > 0 {
@@ -790,12 +768,11 @@ fn rocksdb_core_loop<K, V, M, O, IM, F>(
                     if reduced_capacity > batch_size {
                         encoded_batch_buffers.truncate(reduced_capacity);
                         encoded_batch_buffers.shrink_to(reduced_capacity);
-
-                        encoded_batch.truncate(reduced_capacity);
-                        encoded_batch.shrink_to(reduced_capacity);
                     }
                 }
                 assert!(encoded_batch_buffers.len() >= batch_size);
+
+                let mut encoded_refs: Vec<(K, KeyUpdate<&[u8]>)> = Vec::with_capacity(batch_size);
 
                 // TODO(guswynn): sort by key before writing.
                 for ((key, value, diff), encode_buf) in
@@ -805,35 +782,24 @@ fn rocksdb_core_loop<K, V, M, O, IM, F>(
 
                     match &value {
                         update_type @ (KeyUpdate::Put(update) | KeyUpdate::Merge(update)) => {
-                            let mut encode_buf =
-                                encode_buf.take().expect("encode_buf should not be empty");
-                            encode_buf.clear();
-                            match options
-                                .bincode
-                                .serialize_into::<&mut Vec<u8>, _>(&mut encode_buf, update)
-                            {
-                                Ok(()) => {
-                                    ret.size_written += u64::cast_from(encode_buf.len());
-                                    // calculate the diff size if the diff multiplier is present
-                                    if let Some(diff) = diff {
-                                        let encoded_len = i64::try_from(encode_buf.len())
-                                            .expect("less than i64 size");
-                                        ret.size_diff =
-                                            Some(ret.size_diff.unwrap_or(0) + (diff * encoded_len));
-                                    }
-                                }
-                                Err(e) => {
-                                    let _ = response_sender.send(Err(Error::DecodeError(e)));
-                                    return;
-                                }
-                            };
+                            let encoded = encode_buf.encode(update);
+
+                            ret.size_written += u64::cast_from(encoded.len());
+                            // calculate the diff size if the diff multiplier is present
+                            if let Some(diff) = diff {
+                                let encoded_len =
+                                    i64::try_from(encoded.len()).expect("less than i64 size");
+                                ret.size_diff =
+                                    Some(ret.size_diff.unwrap_or(0) + (diff * encoded_len));
+                            }
+
                             if matches!(update_type, KeyUpdate::Put(_)) {
-                                encoded_batch.push((key, KeyUpdate::Put(encode_buf)));
+                                encoded_refs.push((key, KeyUpdate::Put(encoded)));
                             } else {
-                                encoded_batch.push((key, KeyUpdate::Merge(encode_buf)));
+                                encoded_refs.push((key, KeyUpdate::Merge(encoded)));
                             }
                         }
-                        KeyUpdate::Delete => encoded_batch.push((key, KeyUpdate::Delete)),
+                        KeyUpdate::Delete => encoded_refs.push((key, KeyUpdate::Delete)),
                     }
                 }
                 // Perform the multi_update and record metrics, if there wasn't an error.
@@ -843,7 +809,7 @@ fn rocksdb_core_loop<K, V, M, O, IM, F>(
                     .retry(|_| {
                         let mut writes = rocksdb::WriteBatch::default();
 
-                        for (key, value) in encoded_batch.iter() {
+                        for (key, value) in encoded_refs.iter() {
                             match value {
                                 KeyUpdate::Put(update) => writes.put(key, update),
                                 KeyUpdate::Merge(update) => writes.merge(key, update),
@@ -869,15 +835,6 @@ fn rocksdb_core_loop<K, V, M, O, IM, F>(
                             },
                         }
                     });
-
-                // put back the values in the buffer so we don't lose allocation
-                for (i, (_, encoded_buffer)) in encoded_batch.drain(..).enumerate() {
-                    if let KeyUpdate::Put(encoded_buffer) | KeyUpdate::Merge(encoded_buffer) =
-                        encoded_buffer
-                    {
-                        encoded_batch_buffers[i] = Some(encoded_buffer);
-                    }
-                }
 
                 let _ = match retry_result {
                     Ok(()) => {
