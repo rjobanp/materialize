@@ -11,8 +11,8 @@
 //!
 //! # Snapshot reading
 //!
-//! Depending on the `subsource_resume_uppers` parameter this dataflow decides which tables to
-//! snapshot and performs a simple `SELECT * FROM table` on them in order to get a snapshot.
+//! Depending on the `SourceOutputs::resume_upper` parameters this dataflow decides which tables
+//! to snapshot and performs a simple `SELECT * FROM table` on them in order to get a snapshot.
 //! There are a few subtle points about this operation, described below.
 //!
 //! It is crucial for correctness that we always perform the snapshot of all tables at a specific
@@ -118,7 +118,7 @@ use crate::source::RawSourceCreationConfig;
 use super::schemas::verify_schemas;
 use super::{
     return_definite_error, validate_mysql_repl_settings, DefiniteError, MySqlTableName,
-    ReplicationError, RewindRequest, SubsourceInfo, TransientError,
+    ReplicationError, RewindRequest, SourceOutputInfo, TransientError,
 };
 
 /// Renders the snapshot dataflow. See the module documentation for more information.
@@ -126,7 +126,7 @@ pub(crate) fn render<G: Scope<Timestamp = GtidPartition>>(
     scope: G,
     config: RawSourceCreationConfig,
     connection: MySqlSourceConnection,
-    subsources: Vec<SubsourceInfo>,
+    source_outputs: Vec<SourceOutputInfo>,
     metrics: MySqlSnapshotMetrics,
 ) -> (
     StackedCollection<G, (usize, Result<SourceMessage, DataflowError>)>,
@@ -140,30 +140,35 @@ pub(crate) fn render<G: Scope<Timestamp = GtidPartition>>(
 
     let (mut raw_handle, raw_data) = builder.new_output::<AccountedStackBuilder<_>>();
     let (mut rewinds_handle, rewinds) = builder.new_output();
-    // Captures DefiniteErrors that affect the entire source, including all subsources
+    // Captures DefiniteErrors that affect the entire source, including all outputs
     let (mut definite_error_handle, definite_errors) = builder.new_output();
 
     let (mut stats_output, stats_stream) = builder.new_output();
 
     // A global view of all outputs that will be snapshot by all workers.
     let mut all_outputs = vec![];
-    // A map containing only the table infos that this worker should snapshot.
+    // A map containing only the table infos that this worker should snapshot
+    // The key is an upstream table name
+    // The value is a Vec of (output_index, table_desc) since we can have multiple outputs
+    // for a single table
     let mut reader_snapshot_table_info = BTreeMap::new();
 
-    for subsource in subsources.into_iter() {
+    for output in source_outputs.into_iter() {
         mz_ore::soft_assert_or_log!(
-            subsource.output_index != 0,
-            "primary collection should not be represented in subsources info"
+            output.output_index != 0,
+            "primary collection should not be represented in source outputs"
         );
         // Determine which collections need to be snapshot and which already have been.
-        if *subsource.resume_upper != [GtidPartition::minimum()] {
+        if *output.resume_upper != [GtidPartition::minimum()] {
             // Already has been snapshotted.
             continue;
         }
-        all_outputs.push(subsource.output_index);
-        if config.responsible_for(&subsource.name) {
+        all_outputs.push(output.output_index);
+        if config.responsible_for(&output.table_name) {
             reader_snapshot_table_info
-                .insert(subsource.name, (subsource.output_index, subsource.desc));
+                .entry(output.table_name)
+                .or_insert_with(Vec::new)
+                .push((output.output_index, output.desc));
         }
     }
 

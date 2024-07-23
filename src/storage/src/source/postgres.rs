@@ -94,7 +94,7 @@ use mz_sql_parser::ast::{display::AstDisplay, Ident};
 use mz_storage_types::errors::{DataflowError, SourceError, SourceErrorDetails};
 use mz_storage_types::sources::postgres::CastType;
 use mz_storage_types::sources::{
-    MzOffset, PostgresSourceConnection, SourceExport, SourceTimestamp,
+    MzOffset, PostgresSourceConnection, SourceExport, SourceExportDetails, SourceTimestamp,
 };
 use mz_timely_util::builder_async::PressOnDropButton;
 use serde::{Deserialize, Serialize};
@@ -132,43 +132,43 @@ impl SourceRender for PostgresSourceConnection {
         Stream<G, ProgressStatisticsUpdate>,
         Vec<PressOnDropButton>,
     ) {
-        // Determined which collections need to be snapshot and which already have been.
-        let subsource_resume_uppers: BTreeMap<_, _> = config
-            .source_resume_uppers
-            .iter()
-            .map(|(id, upper)| {
-                assert!(
-                    config.source_exports.contains_key(id),
-                    "all source resume uppers must be present in source exports"
-                );
-
-                (
-                    *id,
-                    Antichain::from_iter(upper.iter().map(MzOffset::decode_row)),
-                )
-            })
-            .collect();
-
-        // Collect the tables that we will be ingesting.
-        let mut table_info = BTreeMap::new();
-        for SourceExport {
-            ingestion_output, ..
-        } in config.source_exports.values()
+        // Collect the source outputs that we will be exporting.
+        let mut source_outputs = Vec::new();
+        for (
+            id,
+            SourceExport {
+                ingestion_output,
+                details,
+                storage_metadata: _,
+            },
+        ) in &config.source_exports
         {
             // Output index 0 is the primary source which is not a table.
             if *ingestion_output == 0 {
                 continue;
             }
 
-            // The output index is 1 greater than the publication details' index
-            // to account for the primary output being at index 0.
-            let table_idx = *ingestion_output - 1;
-            let desc = self.publication_details.tables[table_idx].clone();
+            let details = match details {
+                SourceExportDetails::Postgres(details) => details,
+                _ => panic!("unexpected source export details"),
+            };
 
-            // Tables are indexed by their native index, but table casts are
-            // indexed by the output index.
-            let casts = self.table_casts[ingestion_output].clone();
-            table_info.insert(desc.oid, (*ingestion_output, desc.clone(), casts.clone()));
+            let desc = details.table.clone();
+            let casts = details.table_cast.clone();
+            let resume_upper = Antichain::from_iter(
+                config
+                    .source_resume_uppers
+                    .get(id)
+                    .expect("all source resume uppers must be present in source exports")
+                    .iter()
+                    .map(MzOffset::decode_row),
+            );
+            source_outputs.push(SourceOutputInfo {
+                output_index: *ingestion_output,
+                desc,
+                casts,
+                resume_upper,
+            });
         }
 
         let metrics = config.metrics.get_postgres_source_metrics(config.id);
@@ -178,8 +178,7 @@ impl SourceRender for PostgresSourceConnection {
                 scope.clone(),
                 config.clone(),
                 self.clone(),
-                subsource_resume_uppers.clone(),
-                table_info.clone(),
+                source_outputs.clone(),
                 metrics.snapshot_metrics.clone(),
             );
 
@@ -187,8 +186,7 @@ impl SourceRender for PostgresSourceConnection {
             scope.clone(),
             config,
             self,
-            subsource_resume_uppers,
-            table_info,
+            source_outputs,
             &rewinds,
             resume_uppers,
             metrics,
@@ -243,6 +241,14 @@ impl SourceRender for PostgresSourceConnection {
             vec![snapshot_token, repl_token],
         )
     }
+}
+
+#[derive(Clone, Debug)]
+struct SourceOutputInfo {
+    output_index: usize,
+    desc: PostgresTableDesc,
+    casts: Vec<(CastType, MirScalarExpr)>,
+    resume_upper: Antichain<MzOffset>,
 }
 
 #[derive(Clone, Debug, thiserror::Error)]

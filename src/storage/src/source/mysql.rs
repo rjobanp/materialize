@@ -37,7 +37,7 @@
 //! separate error types:
 //!
 //! [`DefiniteError`]s are errors that happen during processing of a specific collection record.
-//! These are the only errors that can ever end up in the error collection of a subsource.
+//! These are the only errors that can ever end up in the error collection of a source export.
 //!
 //! [`TransientError`]s are any errors that can happen for reasons that are unrelated to the data
 //! itself. This could be authentication failures, connection failures, etc. The only operators
@@ -74,7 +74,7 @@ use mz_mysql_util::{
 use mz_ore::error::ErrorExt;
 use mz_storage_types::errors::SourceErrorDetails;
 use mz_storage_types::sources::mysql::{gtid_set_frontier, GtidPartition, GtidState};
-use mz_storage_types::sources::{MySqlSourceConnection, SourceTimestamp};
+use mz_storage_types::sources::{MySqlSourceConnection, SourceExportDetails, SourceTimestamp};
 use mz_timely_util::builder_async::{AsyncOutputHandle, PressOnDropButton};
 use mz_timely_util::order::Extrema;
 
@@ -107,12 +107,14 @@ impl SourceRender for MySqlSourceConnection {
         Stream<G, ProgressStatisticsUpdate>,
         Vec<PressOnDropButton>,
     ) {
-        // Collect the subsources that we will be exporting.
-        let mut subsources = Vec::new();
+        // Collect the source outputs that we will be exporting.
+        let mut source_outputs = Vec::new();
         for (
             id,
             SourceExport {
-                ingestion_output, ..
+                ingestion_output,
+                details,
+                storage_metadata: _,
             },
         ) in &config.source_exports
         {
@@ -121,9 +123,13 @@ impl SourceRender for MySqlSourceConnection {
                 continue;
             }
 
-            let table_index = ingestion_output - 1;
-            let desc = self.details.tables[table_index].clone();
-            let initial_gtid_set = self.details.table_initial_gtid_set(table_index).to_string();
+            let details = match details {
+                SourceExportDetails::MySql(details) => details,
+                _ => panic!("unexpected source export details"),
+            };
+
+            let desc = details.table.clone();
+            let initial_gtid_set = details.initial_gtid_set.to_string();
             let resume_upper = Antichain::from_iter(
                 config
                     .source_resume_uppers
@@ -132,8 +138,8 @@ impl SourceRender for MySqlSourceConnection {
                     .iter()
                     .map(GtidPartition::decode_row),
             );
-            subsources.push(SubsourceInfo {
-                name: MySqlTableName::new(&desc.schema_name, &desc.name),
+            source_outputs.push(SourceOutputInfo {
+                table_name: MySqlTableName::new(&desc.schema_name, &desc.name),
                 output_index: *ingestion_output,
                 desc,
                 initial_gtid_set: gtid_set_frontier(&initial_gtid_set).expect("invalid gtid set"),
@@ -148,7 +154,7 @@ impl SourceRender for MySqlSourceConnection {
                 scope.clone(),
                 config.clone(),
                 self.clone(),
-                subsources.clone(),
+                source_outputs.clone(),
                 metrics.snapshot_metrics.clone(),
             );
 
@@ -156,7 +162,7 @@ impl SourceRender for MySqlSourceConnection {
             scope.clone(),
             config.clone(),
             self.clone(),
-            subsources,
+            source_outputs,
             &rewinds,
             metrics,
         );
@@ -211,9 +217,9 @@ impl SourceRender for MySqlSourceConnection {
 }
 
 #[derive(Clone, Debug)]
-struct SubsourceInfo {
+struct SourceOutputInfo {
     output_index: usize,
-    name: MySqlTableName,
+    table_name: MySqlTableName,
     desc: MySqlTableDesc,
     initial_gtid_set: Antichain<GtidPartition>,
     resume_upper: Antichain<GtidPartition>,
@@ -323,8 +329,8 @@ impl From<&MySqlTableDesc> for MySqlTableName {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub(crate) struct RewindRequest {
-    /// The table that should be rewound.
-    pub(crate) table: MySqlTableName,
+    /// The output index that should be rewound.
+    pub(crate) output_index: usize,
     /// The frontier of GTIDs that this snapshot represents; all GTIDs that are not beyond this
     /// frontier have been committed by the snapshot operator at timestamp 0.
     pub(crate) snapshot_upper: Antichain<GtidPartition>,

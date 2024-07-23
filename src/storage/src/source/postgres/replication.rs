@@ -117,8 +117,9 @@ use tokio_postgres::Client;
 use tracing::{error, trace};
 
 use crate::metrics::source::postgres::PgSourceMetrics;
-use crate::source::postgres::verify_schema;
-use crate::source::postgres::{DefiniteError, ReplicationError, TransientError};
+use crate::source::postgres::{
+    verify_schema, DefiniteError, ReplicationError, SourceOutputInfo, TransientError,
+};
 use crate::source::types::{
     ProgressStatisticsUpdate, SignaledFuture, SourceMessage, StackedCollection,
 };
@@ -132,8 +133,8 @@ static PG_EPOCH: Lazy<SystemTime> = Lazy::new(|| UNIX_EPOCH + Duration::from_sec
 // whose `lsn <= snapshot_lsn`. By convention the snapshot is always emitted at LSN 0.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct RewindRequest {
-    /// The table OID that should be rewound.
-    pub(crate) oid: u32,
+    /// The output index that should be rewound.
+    pub(crate) output_index: usize,
     /// The LSN that the snapshot was taken at.
     pub(crate) snapshot_lsn: MzOffset,
 }
@@ -143,8 +144,7 @@ pub(crate) fn render<G: Scope<Timestamp = MzOffset>>(
     scope: G,
     config: RawSourceCreationConfig,
     connection: PostgresSourceConnection,
-    subsource_resume_uppers: BTreeMap<GlobalId, Antichain<MzOffset>>,
-    table_info: BTreeMap<u32, (usize, PostgresTableDesc, Vec<(CastType, MirScalarExpr)>)>,
+    source_outputs: Vec<SourceOutputInfo>,
     rewind_stream: &Stream<G, RewindRequest>,
     committed_uppers: impl futures::Stream<Item = Antichain<MzOffset>> + 'static,
     metrics: PgSourceMetrics,

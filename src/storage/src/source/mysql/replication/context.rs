@@ -30,7 +30,7 @@ pub(super) struct ReplContext<'a> {
     pub(super) config: &'a RawSourceCreationConfig,
     pub(super) connection_config: &'a Config,
     pub(super) stream: Pin<&'a mut futures::stream::Peekable<BinlogStream>>,
-    pub(super) table_info: &'a BTreeMap<MySqlTableName, (usize, MySqlTableDesc)>,
+    pub(super) table_info: &'a BTreeMap<MySqlTableName, Vec<(usize, MySqlTableDesc)>>,
     pub(super) metrics: &'a MySqlSourceMetrics,
     pub(super) text_columns: &'a Vec<MySqlColumnRef>,
     pub(super) ignore_columns: &'a Vec<MySqlColumnRef>,
@@ -41,7 +41,7 @@ pub(super) struct ReplContext<'a> {
     pub(super) data_cap_set: &'a mut CapabilitySet<GtidPartition>,
     pub(super) upper_cap_set: &'a mut CapabilitySet<GtidPartition>,
     // Owned values:
-    pub(super) rewinds: BTreeMap<MySqlTableName, (Capability<GtidPartition>, RewindRequest)>,
+    pub(super) rewinds: BTreeMap<usize, (Capability<GtidPartition>, RewindRequest)>,
     pub(super) errored_tables: BTreeSet<MySqlTableName>,
 }
 
@@ -50,7 +50,7 @@ impl<'a> ReplContext<'a> {
         config: &'a RawSourceCreationConfig,
         connection_config: &'a Config,
         stream: Pin<&'a mut futures::stream::Peekable<BinlogStream>>,
-        table_info: &'a BTreeMap<MySqlTableName, (usize, MySqlTableDesc)>,
+        table_info: &'a BTreeMap<MySqlTableName, Vec<(usize, MySqlTableDesc)>>,
         metrics: &'a MySqlSourceMetrics,
         text_columns: &'a Vec<MySqlColumnRef>,
         ignore_columns: &'a Vec<MySqlColumnRef>,
@@ -60,7 +60,7 @@ impl<'a> ReplContext<'a> {
         >,
         data_cap_set: &'a mut CapabilitySet<GtidPartition>,
         upper_cap_set: &'a mut CapabilitySet<GtidPartition>,
-        rewinds: BTreeMap<MySqlTableName, (Capability<GtidPartition>, RewindRequest)>,
+        rewinds: BTreeMap<usize, (Capability<GtidPartition>, RewindRequest)>,
     ) -> Self {
         Self {
             config,
