@@ -1694,6 +1694,15 @@ impl<'a> Transaction<'a> {
         self.system_configurations.delete(|_k, _v| true, self.op_id);
     }
 
+    pub fn get_system_config(&self, name: &str) -> Option<String> {
+        let key = ServerConfigurationKey {
+            name: name.to_string(),
+        };
+        self.system_configurations
+            .get(&key)
+            .map(|entry| entry.value.clone())
+    }
+
     pub(crate) fn insert_config(&mut self, key: String, value: u64) -> Result<(), CatalogError> {
         match self.configs.insert(
             ConfigKey { key: key.clone() },
