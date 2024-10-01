@@ -76,12 +76,12 @@ use crate::ast::{
 use crate::catalog::{CatalogItemType, SessionCatalog};
 use crate::kafka_util::{KafkaSinkConfigOptionExtracted, KafkaSourceConfigOptionExtracted};
 use crate::names::{
-    Aug, FullItemName, PartialItemName, ResolvedColumnReference, ResolvedDataType, ResolvedIds,
-    ResolvedItemName,
+    Aug, FullItemName, PartialItemName, RawDatabaseSpecifier, ResolvedColumnReference,
+    ResolvedDataType, ResolvedIds, ResolvedItemName,
 };
 use crate::plan::error::PlanError;
 use crate::plan::statement::ddl::load_generator_ast_to_generator;
-use crate::plan::StatementContext;
+use crate::plan::{SourceReferences, StatementContext};
 use crate::session::vars;
 use crate::{kafka_util, normalize};
 
@@ -93,6 +93,7 @@ use self::error::{
 pub(crate) mod error;
 pub mod mysql;
 pub mod postgres;
+mod references;
 
 pub(crate) struct RequestedSourceExport<'a, T> {
     external_reference: UnresolvedItemName,
@@ -233,6 +234,9 @@ pub enum PurifiedStatement {
         create_source_stmt: CreateSourceStatement<Aug>,
         // Map of subsource names to external details
         subsources: BTreeMap<UnresolvedItemName, PurifiedSourceExport>,
+        /// All the available upstream references that can be added as tables
+        /// to this primary source.
+        available_source_references: SourceReferences,
     },
     PurifiedAlterSource {
         alter_source_stmt: AlterSourceStatement<Aug>,
@@ -1024,15 +1028,25 @@ async fn purify_create_source(
             }
         }
         CreateSourceConnection::LoadGenerator { generator, options } => {
-            let (_load_generator, available_subsources) =
+            let load_generator =
                 load_generator_ast_to_generator(&scx, generator, options, include_metadata)?;
 
             match external_references {
                 Some(ExternalReferences::All) => {
-                    let available_subsources = match available_subsources {
-                        Some(available_subsources) => available_subsources,
-                        None => Err(LoadGeneratorSourcePurificationError::ForAllTables)?,
-                    };
+                    let mut available_subsources = BTreeMap::new();
+                    for (name, desc, output) in load_generator.views() {
+                        let name = FullItemName {
+                            database: RawDatabaseSpecifier::Name(
+                                mz_storage_types::sources::load_generator::LOAD_GENERATOR_DATABASE_NAME.to_owned(),
+                            ),
+                            schema: load_generator.schema_name().into(),
+                            item: name.to_string(),
+                        };
+                        available_subsources.insert(name, (desc, output));
+                    }
+                    if available_subsources.is_empty() {
+                        Err(LoadGeneratorSourcePurificationError::ForAllTables)?;
+                    }
                     for (name, (desc, output)) in available_subsources {
                         let subsource_name = source_export_name_gen(source_name, &name.item)?;
                         let external_reference = UnresolvedItemName::from(name);
@@ -1148,6 +1162,7 @@ async fn purify_create_source(
         create_progress_subsource_stmt,
         create_source_stmt,
         subsources: requested_subsource_map,
+        available_source_references: // TODO Implement,
     })
 }
 

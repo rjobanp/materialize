@@ -534,6 +534,7 @@ impl Coordinator {
                 create_progress_subsource_stmt,
                 create_source_stmt,
                 subsources,
+                available_source_references,
             } => {
                 self.plan_purified_create_source(
                     &ctx,
@@ -541,6 +542,7 @@ impl Coordinator {
                     create_progress_subsource_stmt,
                     create_source_stmt,
                     subsources,
+                    available_source_references,
                 )
                 .await
             }
