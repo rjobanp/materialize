@@ -21,196 +21,196 @@ use super::error::{
 
 /// A client that allows determining all available source references and resolving
 /// them to a user-specified source reference during purification.
-pub(crate) enum SourceReferenceClient {
+pub(super) enum SourceReferenceClient<'a> {
     Postgres {
-        client: mz_postgres_util::Client,
-        publication: String,
+        client: &'a mz_postgres_util::Client,
+        publication: &'a str,
     },
-    MySQL {
-        conn: mz_mysql_util::MySqlConn,
+    MySql {
+        conn: &'a mut mz_mysql_util::MySqlConn,
     },
     Kafka {
-        topic: String,
+        topic: &'a str,
     },
     LoadGenerator {
-        generator: LoadGenerator,
+        generator: &'a LoadGenerator,
     },
 }
 
-impl SourceReferenceClient {
-    /// Instantiate a `SourceReferenceClient` from a `CreateSourceConnection`.
-    async fn from_create_source(
-        source: &CreateSourceConnection<Aug>,
-        scx: &StatementContext<'_>,
-        catalog: &impl SessionCatalog,
-        storage_configuration: &StorageConfiguration,
-        include_metadata: &[SourceIncludeMetadata],
-    ) -> Result<Self, PlanError> {
-        match source {
-            CreateSourceConnection::Postgres {
-                connection,
-                options,
-            }
-            | CreateSourceConnection::Yugabyte {
-                connection,
-                options,
-            } => {
-                let connection = {
-                    let item = scx.get_item_by_resolved_name(connection)?;
-                    match item.connection().map_err(PlanError::from)? {
-                        Connection::Postgres(connection) => {
-                            connection.clone().into_inline_connection(&catalog)
-                        }
-                        _ => Err(PgSourcePurificationError::NotPgConnection(
-                            scx.catalog.resolve_full_name(item.name()),
-                        ))?,
-                    }
-                };
+impl<'a> SourceReferenceClient<'a> {
+    // /// Instantiate a `SourceReferenceClient` from a `CreateSourceConnection`.
+    // pub(super) async fn from_create_source(
+    //     source: &CreateSourceConnection<Aug>,
+    //     scx: &StatementContext<'_>,
+    //     catalog: &impl SessionCatalog,
+    //     storage_configuration: &StorageConfiguration,
+    //     include_metadata: &[SourceIncludeMetadata],
+    // ) -> Result<Self, PlanError> {
+    //     match source {
+    //         CreateSourceConnection::Postgres {
+    //             connection,
+    //             options,
+    //         }
+    //         | CreateSourceConnection::Yugabyte {
+    //             connection,
+    //             options,
+    //         } => {
+    //             let connection = {
+    //                 let item = scx.get_item_by_resolved_name(connection)?;
+    //                 match item.connection().map_err(PlanError::from)? {
+    //                     Connection::Postgres(connection) => {
+    //                         connection.clone().into_inline_connection(&catalog)
+    //                     }
+    //                     _ => Err(PgSourcePurificationError::NotPgConnection(
+    //                         scx.catalog.resolve_full_name(item.name()),
+    //                     ))?,
+    //                 }
+    //             };
 
-                let crate::plan::statement::PgConfigOptionExtracted { publication, .. } =
-                    options.clone().try_into()?;
-                let publication =
-                    publication.ok_or(PgSourcePurificationError::ConnectionMissingPublication)?;
+    //             let crate::plan::statement::PgConfigOptionExtracted { publication, .. } =
+    //                 options.clone().try_into()?;
+    //             let publication =
+    //                 publication.ok_or(PgSourcePurificationError::ConnectionMissingPublication)?;
 
-                // verify that we can connect upstream and snapshot publication metadata
-                let config = connection
-                    .config(
-                        &storage_configuration.connection_context.secrets_reader,
-                        storage_configuration,
-                        InTask::No,
-                    )
-                    .await?;
+    //             // verify that we can connect upstream and snapshot publication metadata
+    //             let config = connection
+    //                 .config(
+    //                     &storage_configuration.connection_context.secrets_reader,
+    //                     storage_configuration,
+    //                     InTask::No,
+    //                 )
+    //                 .await?;
 
-                let client = config
-                    .connect(
-                        "postgres_purification",
-                        &storage_configuration.connection_context.ssh_tunnel_manager,
-                    )
-                    .await?;
+    //             let client = config
+    //                 .connect(
+    //                     "postgres_purification",
+    //                     &storage_configuration.connection_context.ssh_tunnel_manager,
+    //                 )
+    //                 .await?;
 
-                Ok(SourceReferenceClient::Postgres {
-                    client,
-                    publication,
-                })
-            }
+    //             Ok(SourceReferenceClient::Postgres {
+    //                 client,
+    //                 publication,
+    //             })
+    //         }
 
-            CreateSourceConnection::MySql {
-                connection,
-                options: _,
-            } => {
-                let connection_item = scx.get_item_by_resolved_name(connection)?;
-                let connection = match connection_item.connection()? {
-                    Connection::MySql(connection) => {
-                        connection.clone().into_inline_connection(&catalog)
-                    }
-                    _ => Err(MySqlSourcePurificationError::NotMySqlConnection(
-                        scx.catalog.resolve_full_name(connection_item.name()),
-                    ))?,
-                };
+    //         CreateSourceConnection::MySql {
+    //             connection,
+    //             options: _,
+    //         } => {
+    //             let connection_item = scx.get_item_by_resolved_name(connection)?;
+    //             let connection = match connection_item.connection()? {
+    //                 Connection::MySql(connection) => {
+    //                     connection.clone().into_inline_connection(&catalog)
+    //                 }
+    //                 _ => Err(MySqlSourcePurificationError::NotMySqlConnection(
+    //                     scx.catalog.resolve_full_name(connection_item.name()),
+    //                 ))?,
+    //             };
 
-                let config = connection
-                    .config(
-                        &storage_configuration.connection_context.secrets_reader,
-                        storage_configuration,
-                        InTask::No,
-                    )
-                    .await?;
+    //             let config = connection
+    //                 .config(
+    //                     &storage_configuration.connection_context.secrets_reader,
+    //                     storage_configuration,
+    //                     InTask::No,
+    //                 )
+    //                 .await?;
 
-                let conn = config
-                    .connect(
-                        "mysql purification",
-                        &storage_configuration.connection_context.ssh_tunnel_manager,
-                    )
-                    .await?;
+    //             let conn = config
+    //                 .connect(
+    //                     "mysql purification",
+    //                     &storage_configuration.connection_context.ssh_tunnel_manager,
+    //                 )
+    //                 .await?;
 
-                Ok(SourceReferenceClient::MySQL { conn })
-            }
-            CreateSourceConnection::LoadGenerator { generator, options } => {
-                let load_generator =
-                    load_generator_ast_to_generator(&scx, generator, options, include_metadata)?;
+    //             Ok(SourceReferenceClient::MySQL { conn })
+    //         }
+    //         CreateSourceConnection::LoadGenerator { generator, options } => {
+    //             let load_generator =
+    //                 load_generator_ast_to_generator(&scx, generator, options, include_metadata)?;
 
-                Ok(SourceReferenceClient::LoadGenerator {
-                    generator: load_generator,
-                })
-            }
-            CreateSourceConnection::Kafka {
-                connection: _,
-                options,
-            } => {
-                let extracted_options: KafkaSourceConfigOptionExtracted =
-                    options.clone().try_into()?;
+    //             Ok(SourceReferenceClient::LoadGenerator {
+    //                 generator: load_generator,
+    //             })
+    //         }
+    //         CreateSourceConnection::Kafka {
+    //             connection: _,
+    //             options,
+    //         } => {
+    //             let extracted_options: KafkaSourceConfigOptionExtracted =
+    //                 options.clone().try_into()?;
 
-                let topic = extracted_options
-                    .topic
-                    .ok_or(KafkaSourcePurificationError::ConnectionMissingTopic)?;
-                Ok(SourceReferenceClient::Kafka { topic })
-            }
-        }
-    }
+    //             let topic = extracted_options
+    //                 .topic
+    //                 .ok_or(KafkaSourcePurificationError::ConnectionMissingTopic)?;
+    //             Ok(SourceReferenceClient::Kafka { topic })
+    //         }
+    //     }
+    // }
 
-    /// Instantiate a `SourceReferenceClient` from a `GenericSourceConnection`.
-    async fn from_existing_source(
-        source: &GenericSourceConnection<InlinedConnection>,
-        storage_configuration: &StorageConfiguration,
-    ) -> Result<Self, PlanError> {
-        match source {
-            GenericSourceConnection::Postgres(pg_source_connection) => {
-                // Get PostgresConnection for generating subsources.
-                let pg_connection = &pg_source_connection.connection;
+    // /// Instantiate a `SourceReferenceClient` from a `GenericSourceConnection`.
+    // pub(super) async fn from_existing_source(
+    //     source: &GenericSourceConnection<InlinedConnection>,
+    //     storage_configuration: &StorageConfiguration,
+    // ) -> Result<Self, PlanError> {
+    //     match source {
+    //         GenericSourceConnection::Postgres(pg_source_connection) => {
+    //             // Get PostgresConnection for generating subsources.
+    //             let pg_connection = &pg_source_connection.connection;
 
-                let config = pg_connection
-                    .config(
-                        &storage_configuration.connection_context.secrets_reader,
-                        storage_configuration,
-                        InTask::No,
-                    )
-                    .await?;
+    //             let config = pg_connection
+    //                 .config(
+    //                     &storage_configuration.connection_context.secrets_reader,
+    //                     storage_configuration,
+    //                     InTask::No,
+    //                 )
+    //                 .await?;
 
-                let client = config
-                    .connect(
-                        "postgres_purification",
-                        &storage_configuration.connection_context.ssh_tunnel_manager,
-                    )
-                    .await?;
-                Ok(SourceReferenceClient::Postgres {
-                    client,
-                    publication: pg_source_connection.publication.clone(),
-                })
-            }
-            GenericSourceConnection::MySql(mysql_source_connection) => {
-                let mysql_connection = &mysql_source_connection.connection;
-                let config = mysql_connection
-                    .config(
-                        &storage_configuration.connection_context.secrets_reader,
-                        storage_configuration,
-                        InTask::No,
-                    )
-                    .await?;
+    //             let client = config
+    //                 .connect(
+    //                     "postgres_purification",
+    //                     &storage_configuration.connection_context.ssh_tunnel_manager,
+    //                 )
+    //                 .await?;
+    //             Ok(SourceReferenceClient::Postgres {
+    //                 client,
+    //                 publication: pg_source_connection.publication.clone(),
+    //             })
+    //         }
+    //         GenericSourceConnection::MySql(mysql_source_connection) => {
+    //             let mysql_connection = &mysql_source_connection.connection;
+    //             let config = mysql_connection
+    //                 .config(
+    //                     &storage_configuration.connection_context.secrets_reader,
+    //                     storage_configuration,
+    //                     InTask::No,
+    //                 )
+    //                 .await?;
 
-                let conn = config
-                    .connect(
-                        "mysql purification",
-                        &storage_configuration.connection_context.ssh_tunnel_manager,
-                    )
-                    .await?;
+    //             let conn = config
+    //                 .connect(
+    //                     "mysql purification",
+    //                     &storage_configuration.connection_context.ssh_tunnel_manager,
+    //                 )
+    //                 .await?;
 
-                Ok(SourceReferenceClient::MySQL { conn })
-            }
-            GenericSourceConnection::LoadGenerator(load_gen_connection) => {
-                Ok(SourceReferenceClient::LoadGenerator {
-                    generator: load_gen_connection.load_generator.clone(),
-                })
-            }
-            GenericSourceConnection::Kafka(kafka_source_connection) => {
-                Ok(SourceReferenceClient::Kafka {
-                    topic: kafka_source_connection.topic.clone(),
-                })
-            }
-        }
-    }
+    //             Ok(SourceReferenceClient::MySQL { conn })
+    //         }
+    //         GenericSourceConnection::LoadGenerator(load_gen_connection) => {
+    //             Ok(SourceReferenceClient::LoadGenerator {
+    //                 generator: load_gen_connection.load_generator.clone(),
+    //             })
+    //         }
+    //         GenericSourceConnection::Kafka(kafka_source_connection) => {
+    //             Ok(SourceReferenceClient::Kafka {
+    //                 topic: kafka_source_connection.topic.clone(),
+    //             })
+    //         }
+    //     }
+    // }
 
     /// Get all available source references.
-    async fn get_source_references(&mut self) -> Result<SourceReferences, PlanError> {
+    pub(super) async fn get_source_references(&mut self) -> Result<SourceReferences, PlanError> {
         match self {
             SourceReferenceClient::Postgres {
                 client,
@@ -229,9 +229,9 @@ impl SourceReferenceClient {
                         .collect(),
                 })
             }
-            SourceReferenceClient::MySQL { conn } => {
+            SourceReferenceClient::MySql { conn } => {
                 let tables = mz_mysql_util::schema_info(
-                    conn.deref_mut(),
+                    (*conn).deref_mut(),
                     &mz_mysql_util::SchemaRequest::All,
                 )
                 .await?;
@@ -255,7 +255,7 @@ impl SourceReferenceClient {
             SourceReferenceClient::Kafka { topic } => Ok(SourceReferences {
                 updated_at: SYSTEM_TIME(),
                 references: vec![SourceReference {
-                    name: topic.clone(),
+                    name: topic.to_string(),
                     namespace: None,
                     columns: vec![],
                 }],

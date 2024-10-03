@@ -66,6 +66,7 @@ use prost::Message;
 use protobuf_native::compiler::{SourceTreeDescriptorDatabase, VirtualSourceTree};
 use protobuf_native::MessageLite;
 use rdkafka::admin::AdminClient;
+use references::SourceReferenceClient;
 use uuid::Uuid;
 
 use crate::ast::{
@@ -651,6 +652,8 @@ async fn purify_create_source(
 
     let mut format_options = SourceFormatOptions::Default;
 
+    let available_source_references: SourceReferences;
+
     match source_connection {
         CreateSourceConnection::Kafka {
             connection,
@@ -762,6 +765,9 @@ async fn purify_create_source(
                 }
             }
 
+            let mut reference_client = SourceReferenceClient::Kafka { topic: &topic };
+            available_source_references = reference_client.get_source_references().await?;
+
             format_options = SourceFormatOptions::Kafka { topic };
         }
         source_connection @ CreateSourceConnection::Postgres { .. }
@@ -859,6 +865,12 @@ async fn purify_create_source(
             if available_replication_slots < 2 {
                 Err(PgSourcePurificationError::InsufficientReplicationSlotsAvailable { count: 2 })?;
             }
+
+            let mut reference_client = SourceReferenceClient::Postgres {
+                client: &client,
+                publication: &publication,
+            };
+            available_source_references = reference_client.get_source_references().await?;
 
             let postgres::PurifiedSourceExports {
                 source_exports: subsources,
@@ -984,6 +996,9 @@ async fn purify_create_source(
             let initial_gtid_set =
                 mz_mysql_util::query_sys_var(&mut conn, "global.gtid_executed").await?;
 
+            let mut reference_client = SourceReferenceClient::MySql { conn: &mut conn };
+            available_source_references = reference_client.get_source_references().await?;
+
             let mysql::PurifiedSourceExports {
                 source_exports: subsources,
                 normalized_text_columns,
@@ -1031,19 +1046,26 @@ async fn purify_create_source(
             let load_generator =
                 load_generator_ast_to_generator(&scx, generator, options, include_metadata)?;
 
+            let mut reference_client = SourceReferenceClient::LoadGenerator {
+                generator: &load_generator,
+            };
+            available_source_references = reference_client.get_source_references().await?;
+
+            // TODO: Refactor this to use the available references
+            let mut available_subsources = BTreeMap::new();
+            for (name, desc, output) in load_generator.views() {
+                let name = FullItemName {
+                    database: RawDatabaseSpecifier::Name(
+                        mz_storage_types::sources::load_generator::LOAD_GENERATOR_DATABASE_NAME
+                            .to_owned(),
+                    ),
+                    schema: load_generator.schema_name().into(),
+                    item: name.to_string(),
+                };
+                available_subsources.insert(name, (desc, output));
+            }
             match external_references {
                 Some(ExternalReferences::All) => {
-                    let mut available_subsources = BTreeMap::new();
-                    for (name, desc, output) in load_generator.views() {
-                        let name = FullItemName {
-                            database: RawDatabaseSpecifier::Name(
-                                mz_storage_types::sources::load_generator::LOAD_GENERATOR_DATABASE_NAME.to_owned(),
-                            ),
-                            schema: load_generator.schema_name().into(),
-                            item: name.to_string(),
-                        };
-                        available_subsources.insert(name, (desc, output));
-                    }
                     if available_subsources.is_empty() {
                         Err(LoadGeneratorSourcePurificationError::ForAllTables)?;
                     }
@@ -1070,7 +1092,7 @@ async fn purify_create_source(
                 }
                 None => {
                     if matches!(reference_policy, SourceReferencePolicy::Required)
-                        && available_subsources.is_some()
+                        && !available_subsources.is_empty()
                     {
                         Err(LoadGeneratorSourcePurificationError::MultiOutputRequiresForAllTables)?
                     }
@@ -1162,7 +1184,7 @@ async fn purify_create_source(
         create_progress_subsource_stmt,
         create_source_stmt,
         subsources: requested_subsource_map,
-        available_source_references: // TODO Implement,
+        available_source_references,
     })
 }
 
