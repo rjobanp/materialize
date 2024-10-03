@@ -156,7 +156,7 @@ fn source_export_gen<'a, T: ExternalCatalogReference>(
 /// so that it's generated in the same schema as source
 fn source_export_name_gen(
     source_name: &UnresolvedItemName,
-    subsource_name: &String,
+    subsource_name: &str,
 ) -> Result<UnresolvedItemName, PlanError> {
     let mut partial = normalize::unresolved_item_name(source_name.clone())?;
     partial.item = subsource_name.to_string();
